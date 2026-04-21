@@ -83,7 +83,7 @@ def init_db(db_path: Path = _DB_PATH) -> sqlite3.Connection:
 def save_clip(record: ClipRecord, db_path: Path = _DB_PATH) -> int:
     """插入或更新 clip，并同步 tags。"""
     conn = get_connection(db_path)
-    cursor = conn.execute(
+    conn.execute(
         """
         INSERT INTO clips (
             video_hash,
@@ -130,15 +130,13 @@ def save_clip(record: ClipRecord, db_path: Path = _DB_PATH) -> int:
         ),
     )
 
-    clip_id = cursor.lastrowid
-    if clip_id == 0:
-        row = conn.execute(
-            "SELECT id FROM clips WHERE video_hash = ?",
-            (record.video_hash,),
-        ).fetchone()
-        if row is None:
-            raise RuntimeError(f"未找到已保存的 clip：{record.video_hash}")
-        clip_id = int(row["id"])
+    row = conn.execute(
+        "SELECT id FROM clips WHERE video_hash = ?",
+        (record.video_hash,),
+    ).fetchone()
+    if row is None:
+        raise RuntimeError(f"未找到已保存的 clip：{record.video_hash}")
+    clip_id = int(row["id"])
 
     conn.execute("DELETE FROM clip_tags WHERE clip_id = ?", (clip_id,))
     conn.executemany(

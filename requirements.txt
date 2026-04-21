@@ -5,3 +5,6 @@ pillow
 tenacity
 opencv-python
 pydantic
+fastapi
+uvicorn
+jinja2
