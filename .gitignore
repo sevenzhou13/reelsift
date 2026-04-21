@@ -1,6 +1,7 @@
 .env
 data/
 test-video/
+.venv/
 __pycache__/
 *.pyc
 *.pyo

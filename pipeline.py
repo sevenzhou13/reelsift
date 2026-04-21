@@ -22,9 +22,14 @@ def scan_folder(folder: Path) -> list[Path]:
     return sorted(videos, key=lambda p: p.name)
 
 
-def _video_hash(video_path: Path) -> str:
+def build_video_hash(video_path: Path) -> str:
     """取视频路径字符串的 MD5 前 12 位作为缓存 key。"""
     return hashlib.md5(str(video_path).encode()).hexdigest()[:12]
+
+
+def get_keyframe_paths(frame_dir: Path, count: int = 6) -> list[Path]:
+    """只返回 0.jpg ~ N.jpg，避免把 cover.jpg 混进关键帧列表。"""
+    return [frame_dir / f"{index}.jpg" for index in range(count) if (frame_dir / f"{index}.jpg").exists()]
 
 
 def extract_keyframes(
@@ -37,12 +42,12 @@ def extract_keyframes(
     已有足够帧数时直接跳过。
     返回 (video_hash, 帧目录)。
     """
-    video_hash = _video_hash(video_path)
+    video_hash = build_video_hash(video_path)
     frame_dir = cache_dir / video_hash
 
     # 已缓存则跳过
     if frame_dir.exists():
-        existing = list(frame_dir.glob("*.jpg"))
+        existing = get_keyframe_paths(frame_dir, count)
         if len(existing) >= count:
             return video_hash, frame_dir
 
