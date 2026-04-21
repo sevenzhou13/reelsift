@@ -1,0 +1,6 @@
+ffmpeg-python
+python-dotenv
+rich
+google-genai>=1.0.0
+pillow
+tenacity
