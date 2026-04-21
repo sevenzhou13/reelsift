@@ -2,49 +2,106 @@
 
 面向短视频创作者的本地素材粗筛工具：抽帧、AI 理解、标签摘要，帮助在剪辑前快速筛片。
 
-上传一批拍摄素材后，Reelsift 会自动抽取关键帧，调用 Gemini 理解视频内容，并生成适合剪辑前浏览的摘要与标签，帮助用户更快完成“先筛片、再剪辑”这一步。
+上传一批拍摄素材后，Reelsift 会自动抽取关键帧，调用豆包视觉模型理解视频内容，并生成适合剪辑前浏览的摘要、场景、标签和清晰度结果，帮助用户更快完成“先筛片、再剪辑”这一步。
 
-## 项目定位
+## 当前状态
 
-Reelsift 当前是一个个人使用优先的本地工具，目标非常明确：
+项目已经能跑通一条完整链路：
 
-- 输入：一次拍摄产生的 30-50 条本地视频素材
-- 处理：抽帧、AI 分析、清晰度评分、结果存储
-- 输出：可在浏览器里快速筛选和挑选的素材列表
+- 扫描本地视频目录
+- 抽取 6 张关键帧并缓存
+- 调用豆包视觉生成摘要、场景、主体、动作、标签
+- 计算清晰度分并生成封面图
+- 将结果写入 SQLite
+- 用 FastAPI + Jinja2 + HTMX 在浏览器中展示素材列表
+- 支持关键词搜索和标签筛选
 
-这个项目不做云端上传、不做登录、不做剪辑功能，只专注于“粗筛素材”。
+当前主模型配置：
 
-## 项目状态
+- `ARK_API_STYLE=chat`
+- `ARK_MODEL=doubao-1.5-vision-pro-250328`
 
-- Day 1 已完成：扫描视频、抽取 6 张关键帧
-- Day 2 进行中：Gemini 分析已接入 CLI
-- Day 3 之后未完成：SQLite、清晰度评分、Web 界面仍在开发
+## 已实现功能
 
-## 核心工作流
+### CLI 处理流程
 
-1. 用户把一批视频素材放进本地文件夹
-2. 运行 CLI 扫描目录并抽取每条视频的 6 张关键帧
-3. 调用 Gemini 生成摘要、场景、主体、动作、标签
-4. 后续会把分析结果与评分写入 SQLite
-5. 最终在 Web 页面中按标签和关键词筛选，并导出选中的原始视频
+- 递归扫描视频文件
+- 抽取 6 张关键帧
+- 调用豆包视觉分析视频内容
+- 计算清晰度评分
+- 将结果写入 `data/reelsift.db`
+- 缓存关键帧和封面图到 `data/thumbnails/`
+
+### 数据存储
+
+- `clips` 表保存摘要、场景、动作、主体、清晰度、状态等信息
+- `clip_tags` 表保存标签
+- 已建立基础索引
+
+### Web 页面
+
+- 首页素材网格展示
+- 封面、摘要、场景、标签、清晰度显示
+- 关键词搜索
+- 标签筛选
+- HTMX 局部刷新
+
+## 还没实现的功能
+
+这是当前还没做完、或者还没进入主线的部分：
+
+1. 多选素材
+目前页面只能浏览和筛选，还不能勾选多条素材。
+
+2. 导出选中视频到 `data/picks/`
+数据库和页面已经准备到这一步，但导出动作还没接。
+
+3. 更完整的筛选条件
+现在只有关键词和标签，还没有：
+- 按场景筛选
+- 按清晰度排序/过滤
+- 按是否有运动过滤
+
+4. 相似素材 / 推荐排序
+你之前提到的 embedding、相似素材对比、推荐评分还没做。
+
+5. 重复素材或近重复素材聚类
+这类高级筛片功能还没有实现。
+
+6. 更稳的标签与摘要后处理
+目前主模型已经可用，但某些局部镜头仍可能需要后处理规则进一步修正。
+
+7. Web 端多路由功能拆分
+目前页面已经能用，但服务端还没有完全按 `/clips/*`、`/tags/*`、`/export/*` 这种形态展开。
 
 ## 技术栈
 
-- Python 3.11+
+- Python 3.11+（你当前本机虚拟环境暂时是 3.9，建议后续升级）
 - ffmpeg-python
-- google-genai（`gemini-2.5-flash`）
+- opencv-python
 - sqlite3
-- FastAPI + Jinja2 + HTMX
+- FastAPI
+- Jinja2
+- HTMX
+- Tailwind CSS（CDN）
+- python-dotenv
 
 ## 安装
 
-### 1. 安装 Python 依赖
+### 1. 创建虚拟环境
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+```
+
+### 2. 安装依赖
 
 ```bash
 pip install -r requirements.txt
 ```
 
-### 2. 安装 ffmpeg
+### 3. 安装 ffmpeg
 
 ```bash
 brew install ffmpeg
@@ -56,95 +113,68 @@ brew install ffmpeg
 ffmpeg -version
 ```
 
-### 3. 配置环境变量
+### 4. 配置环境变量
 
-复制 `.env.example` 为 `.env`，填入 Gemini API Key：
+复制 `.env.example` 为 `.env`：
 
 ```bash
 cp .env.example .env
 ```
 
-`.env` 示例：
+示例：
 
 ```env
-GEMINI_API_KEY=your_key_here
+ARK_API_KEY=your_ark_api_key_here
+ARK_BASE_URL=https://ark.cn-beijing.volces.com/api/v3
+ARK_API_STYLE=chat
+ARK_MODEL=doubao-1.5-vision-pro-250328
 ```
 
 ## 快速开始
 
-处理一个本地视频目录：
+### 处理一个视频目录
 
 ```bash
-python reelsift.py /path/to/my/videos
+./.venv/bin/python reelsift.py /path/to/my/videos
 ```
 
-只处理前 3 个视频做联调：
+只处理前 3 条视频做联调：
 
 ```bash
-python reelsift.py /path/to/my/videos --limit 3
+./.venv/bin/python reelsift.py /path/to/my/videos --limit 3
 ```
 
-## 当前可用功能
-
-### CLI：扫描并处理视频
+### 启动 Web 界面
 
 ```bash
-python reelsift.py /path/to/my/videos
+source .venv/bin/activate
+uvicorn server:app --reload --port 8000
 ```
 
-只处理前几个视频做联调：
+浏览器打开：
 
-```bash
-python reelsift.py /path/to/my/videos --limit 3
-```
+- [http://127.0.0.1:8000](http://127.0.0.1:8000)
 
-运行后会：
-
-1. 递归扫描视频文件
-2. 为每个视频抽取 6 张关键帧
-3. 调用 Gemini 生成摘要、场景、主体、动作、标签
-4. 将关键帧缓存到 `data/thumbnails/`
-
-## 目录结构
+## 当前目录结构
 
 ```text
 reelsift/
-├── reelsift.py            # CLI 入口
-├── pipeline.py            # 扫描与抽帧流程
-├── ai.py                  # Gemini 调用封装
-├── metrics.py             # 清晰度 / 抖动评分（待实现）
-├── db.py                  # SQLite 读写（待实现）
-├── server.py              # FastAPI 服务（待实现）
-├── templates/             # Jinja2 模板
-├── static/                # 自定义样式
-└── data/                  # 本地运行数据，不提交到 Git
+├── reelsift.py                    # CLI 入口
+├── pipeline.py                    # 扫描与抽帧流程
+├── ai.py                          # 豆包视觉调用封装
+├── metrics.py                     # 清晰度评分
+├── db.py                          # SQLite 写入
+├── server.py                      # FastAPI 页面服务
+├── templates/
+│   ├── base.html
+│   ├── index.html
+│   └── partials/clip_grid.html
+├── static/
+│   └── style.css
+└── data/
+    ├── reelsift.db
+    └── thumbnails/
 ```
-
-## 尚未完成
-
-以下能力还没有实现完成：
-
-- OpenCV 清晰度 / 抖动评分
-- SQLite 数据库存储
-- FastAPI Web 界面
-- 标签筛选、搜索、多选导出
-
-`python server.py` 目前还只是占位文件，暂时不能作为可用入口。
-
-## 团队协作说明
-
-- 当前主分支为 `main`
-- 本地运行数据不进入版本控制：`.env`、`data/`、`test-video/`
-- 开发时优先按模块拆分：`pipeline.py`、`ai.py`、`db.py`、`server.py`
-- 每次改动后至少跑一次 CLI 联调，避免只看代码不跑流程
-
-## 下一步任务
-
-- 完成 `metrics.py`，补上 OpenCV 清晰度 / 抖动评分
-- 完成 `db.py`，建立 SQLite schema 与索引
-- 把 CLI 分析结果写入数据库
-- 实现 FastAPI + Jinja2 + HTMX 首页
-- 支持标签筛选、关键词搜索、多选导出
 
 ## 常用排查
 
@@ -158,16 +188,26 @@ ffmpeg -version
 
 如果命令不存在，重新安装 ffmpeg。
 
-### Gemini API 401 / 403
+### 方舟 API 401 / 403
 
 检查：
 
 - `.env` 是否存在
-- `GEMINI_API_KEY` 是否填写正确
-- API Key 是否在 Google AI Studio 可用
+- `ARK_API_KEY` 是否填写正确
+- `ARK_MODEL` 是否为可用模型名或可用 Endpoint ID
+- 火山方舟控制台里是否已开通对应模型
 
-## 协作建议
+### 页面能开但没有数据
 
-- 不要提交 `.env`、`data/`、`test-video/`
-- 每个功能单独开分支开发
-- 提交前至少跑一次 CLI 联调
+检查：
+
+- 是否已经先跑过 `reelsift.py`
+- `data/reelsift.db` 是否存在
+- `clips` 表中是否已有记录
+
+## 协作说明
+
+- 当前主分支为 `main`
+- 不要提交 `.env`、`data/`、`test-video/`、`.venv/`
+- 每个功能尽量单独开分支开发
+- 提交前至少跑一次 CLI 或页面联调
