@@ -1,0 +1,103 @@
+{% extends "base.html" %}
+{% block content %}
+<main class="mx-auto max-w-6xl px-4 py-8 sm:px-6 lg:px-8">
+  <section class="mb-8 flex flex-col gap-5 lg:flex-row lg:items-end lg:justify-between">
+    <div>
+      <p class="text-sm uppercase tracking-[0.24em] text-cyan-300/80">Reelsift</p>
+      <h1 class="mt-2 text-3xl font-semibold tracking-tight text-white sm:text-4xl">上传素材并等待 AI 解析完成</h1>
+      <p class="mt-3 max-w-3xl text-sm leading-6 text-slate-300">
+        这一页负责选择素材库、上传视频和查看处理进度。每条视频都会显示独立的解析阶段，全部完成后会自动进入对应素材库。
+      </p>
+    </div>
+
+    <a
+      href="/"
+      class="inline-flex items-center justify-center rounded-2xl border border-white/10 bg-white/5 px-5 py-3 text-sm font-medium text-white transition hover:border-white/20 hover:bg-white/10"
+    >
+      返回素材库
+    </a>
+  </section>
+
+  <form
+    id="upload-form"
+    hx-post="/upload/jobs"
+    hx-target="#upload-flow"
+    hx-swap="innerHTML"
+    hx-encoding="multipart/form-data"
+    class="hidden"
+  >
+    <input
+      id="upload-input"
+      type="file"
+      name="files"
+      multiple
+      accept=".mp4,.mov,.mkv,.webm,video/mp4,video/quicktime,video/x-matroska,video/webm"
+      class="hidden"
+    >
+    <input id="upload-library-id" type="hidden" name="library_id" value="{{ selected_library_id }}">
+    <input id="upload-new-library-name" type="hidden" name="new_library_name" value="{{ pending_library_name }}">
+  </form>
+
+  <section id="upload-flow">
+    {% include "partials/upload_panel.html" %}
+  </section>
+</main>
+
+<script>
+  (() => {
+    const uploadInput = document.getElementById("upload-input");
+    const uploadForm = document.getElementById("upload-form");
+    const hiddenLibraryId = document.getElementById("upload-library-id");
+    const hiddenNewLibraryName = document.getElementById("upload-new-library-name");
+
+    function syncLibraryInputs() {
+      const librarySelect = document.getElementById("library-select");
+      const newLibraryName = document.getElementById("new-library-name");
+      if (librarySelect && hiddenLibraryId) {
+        hiddenLibraryId.value = librarySelect.value;
+      }
+      if (newLibraryName && hiddenNewLibraryName) {
+        hiddenNewLibraryName.value = newLibraryName.value;
+      }
+    }
+
+    function bindUploadTrigger() {
+      const trigger = document.getElementById("upload-trigger");
+      const librarySelect = document.getElementById("library-select");
+      const newLibraryName = document.getElementById("new-library-name");
+      if (!trigger || trigger.dataset.bound === "true") return;
+
+      trigger.dataset.bound = "true";
+      trigger.addEventListener("click", () => {
+        syncLibraryInputs();
+        uploadInput.click();
+      });
+      if (librarySelect && librarySelect.dataset.bound !== "true") {
+        librarySelect.dataset.bound = "true";
+        librarySelect.addEventListener("change", syncLibraryInputs);
+      }
+      if (newLibraryName && newLibraryName.dataset.bound !== "true") {
+        newLibraryName.dataset.bound = "true";
+        newLibraryName.addEventListener("input", syncLibraryInputs);
+      }
+    }
+
+    if (uploadInput) {
+      uploadInput.addEventListener("change", () => {
+        if (uploadInput.files && uploadInput.files.length > 0) {
+          syncLibraryInputs();
+          htmx.trigger(uploadForm, "submit");
+        }
+      });
+    }
+
+    document.body.addEventListener("htmx:afterSwap", (event) => {
+      if (event.target && event.target.id === "upload-flow") {
+        bindUploadTrigger();
+      }
+    });
+
+    document.addEventListener("DOMContentLoaded", bindUploadTrigger);
+  })();
+</script>
+{% endblock %}

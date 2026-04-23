@@ -21,6 +21,11 @@ class VideoMetrics:
     frame_scores: list[FrameScore]
 
 
+@dataclass
+class ComparisonScores:
+    sharpness_score: float
+
+
 def _calculate_frame_sharpness(frame_path: Path) -> float:
     """用拉普拉斯方差估算单帧清晰度。"""
     image = cv2.imread(str(frame_path))
@@ -42,13 +47,42 @@ def score_keyframes(frame_paths: list[Path], cover_path: Path) -> VideoMetrics:
     ]
     best_frame = max(frame_scores, key=lambda item: item.sharpness)
 
-    cover_path.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(best_frame.path, cover_path)
+    resolved_cover_path = cover_path.with_suffix(best_frame.path.suffix)
+    resolved_cover_path.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(best_frame.path, resolved_cover_path)
 
     average_score = sum(item.sharpness for item in frame_scores) / len(frame_scores)
     return VideoMetrics(
         sharpness_score=average_score,
-        cover_path=cover_path,
+        cover_path=resolved_cover_path,
         best_frame_path=best_frame.path,
         frame_scores=frame_scores,
     )
+
+
+def select_cover_frame(frame_paths: list[Path], cover_path: Path) -> Path:
+    """只按固定规则选封面，不在上传阶段做清晰度评分。"""
+    if not frame_paths:
+        raise ValueError("没有可选封面的关键帧")
+
+    sorted_frames = sorted(frame_paths)
+    target_index = min(len(sorted_frames) // 2, len(sorted_frames) - 1)
+    selected_frame = sorted_frames[target_index]
+
+    resolved_cover_path = cover_path.with_suffix(selected_frame.suffix)
+    resolved_cover_path.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(selected_frame, resolved_cover_path)
+    return resolved_cover_path
+
+
+def build_comparison_scores(frame_paths: list[Path]) -> ComparisonScores:
+    """计算相似素材对比用分数，后续可继续扩展更多维度。"""
+    if not frame_paths:
+        raise ValueError("没有可评分的关键帧")
+
+    frame_scores = [
+        _calculate_frame_sharpness(frame_path)
+        for frame_path in sorted(frame_paths)
+    ]
+    average_score = sum(frame_scores) / len(frame_scores)
+    return ComparisonScores(sharpness_score=average_score)

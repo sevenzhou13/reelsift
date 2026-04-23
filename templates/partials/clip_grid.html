@@ -1,77 +1,66 @@
-<div class="mb-6 grid grid-cols-3 gap-3 sm:max-w-md sm:gap-4">
-  <div class="rounded-2xl border border-white/10 bg-white/5 px-4 py-3 backdrop-blur">
-    <p class="text-xs uppercase tracking-[0.18em] text-slate-400">结果数</p>
-    <p class="mt-2 text-2xl font-semibold text-white">{{ stats.total }}</p>
+<div class="mb-8 grid grid-cols-3 gap-3 sm:max-w-md sm:gap-4">
+  <div class="rounded-[18px] border border-[#2A2A30] bg-[#17171A] px-4 py-4">
+    <p class="text-[10px] uppercase tracking-[0.18em] text-[#8A8A92]">结果数</p>
+    <p class="mt-2 text-2xl font-medium tracking-tight text-white">{{ stats.total }}</p>
   </div>
-  <div class="rounded-2xl border border-emerald-400/20 bg-emerald-400/10 px-4 py-3">
-    <p class="text-xs uppercase tracking-[0.18em] text-emerald-200">成功</p>
-    <p class="mt-2 text-2xl font-semibold text-white">{{ stats.done }}</p>
+  <div class="rounded-[18px] border border-[#2A2A30] bg-[#17171A] px-4 py-4">
+    <p class="text-[10px] uppercase tracking-[0.18em] text-[#8A8A92]">成功</p>
+    <p class="mt-2 text-2xl font-medium tracking-tight text-white">{{ stats.done }}</p>
   </div>
-  <div class="rounded-2xl border border-rose-400/20 bg-rose-400/10 px-4 py-3">
-    <p class="text-xs uppercase tracking-[0.18em] text-rose-200">失败</p>
-    <p class="mt-2 text-2xl font-semibold text-white">{{ stats.failed }}</p>
+  <div class="rounded-[18px] border border-[#2A2A30] bg-[#17171A] px-4 py-4">
+    <p class="text-[10px] uppercase tracking-[0.18em] text-[#8A8A92]">失败</p>
+    <p class="mt-2 text-2xl font-medium tracking-tight text-white">{{ stats.failed }}</p>
   </div>
 </div>
 
 {% if clips %}
-<div class="grid gap-5 sm:grid-cols-2 xl:grid-cols-3">
+<div class="grid gap-5 md:grid-cols-2 xl:grid-cols-3">
   {% for clip in clips %}
-  <article class="overflow-hidden rounded-3xl border border-white/10 bg-slate-900/70 shadow-[0_20px_60px_rgba(0,0,0,0.35)]">
-    <div class="relative aspect-[16/10] overflow-hidden bg-slate-800">
-      {% if clip.cover_url %}
-      <img src="{{ clip.cover_url }}" alt="{{ clip.filename }}" class="h-full w-full object-cover">
-      {% else %}
-      <div class="flex h-full items-center justify-center text-sm text-slate-400">暂无封面</div>
-      {% endif %}
-      <div class="absolute inset-x-0 bottom-0 bg-gradient-to-t from-slate-950 via-slate-950/70 to-transparent p-4">
-        <div class="flex items-center justify-between gap-3">
-          <p class="truncate text-sm font-medium text-white">{{ clip.filename }}</p>
-          <span class="rounded-full px-2.5 py-1 text-xs font-medium {% if clip.status == 'done' %}bg-emerald-400/15 text-emerald-200{% else %}bg-rose-400/15 text-rose-200{% endif %}">
-            {{ clip.status }}
-          </span>
-        </div>
-      </div>
-    </div>
+  <article
+    data-clip-card
+    class="relative overflow-hidden rounded-[20px] border border-[#2A2A30] bg-[#17171A] transition duration-200"
+  >
+    <input
+      id="clip-{{ clip.id }}"
+      type="checkbox"
+      name="selected_ids"
+      value="{{ clip.id }}"
+      class="sr-only"
+    >
+    <label
+      for="clip-{{ clip.id }}"
+      data-selection-control
+      class="absolute right-3 top-3 z-20 inline-flex cursor-pointer items-center gap-2 rounded-full border border-[#3A3A42] bg-black/60 px-3 py-1 text-[11px] text-white backdrop-blur"
+    >
+      <span class="selection-dot inline-flex h-4 w-4 items-center justify-center rounded-full border border-[#3A3A42] bg-transparent text-[10px] leading-none text-transparent transition">✓</span>
+      选择
+    </label>
 
-    <div class="space-y-4 p-5">
-      <div class="space-y-2">
-        <div class="flex items-center justify-between gap-3">
-          <p class="text-xs uppercase tracking-[0.18em] text-slate-400">摘要</p>
-          {% if clip.sharpness_score is not none %}
-          <p class="text-xs text-cyan-200">清晰度 {{ "%.1f"|format(clip.sharpness_score) }}</p>
-          {% endif %}
-        </div>
-        <p class="text-lg font-medium leading-7 text-white">{{ clip.summary }}</p>
-        <p class="text-sm text-slate-300">场景：{{ clip.scene }}</p>
-      </div>
-
-      <div class="space-y-2 text-sm text-slate-300">
-        <p>主体：{{ clip.subjects|join("、") if clip.subjects else "—" }}</p>
-        <p>动作：{{ clip.actions|join("、") if clip.actions else "—" }}</p>
-        <p>运动：{{ "是" if clip.has_motion else "否" }}</p>
-      </div>
-
-      {% if clip.tags %}
-      <div class="flex flex-wrap gap-2">
-        {% for tag in clip.tags %}
-        <span class="rounded-full border border-cyan-400/20 bg-cyan-400/10 px-3 py-1 text-xs font-medium text-cyan-100">{{ tag }}</span>
-        {% endfor %}
-      </div>
-      {% endif %}
-
-      <div class="rounded-2xl border border-white/10 bg-white/5 px-3 py-3 text-xs leading-5 text-slate-400">
-        <p class="truncate">路径：{{ clip.filepath }}</p>
-        {% if clip.error_message %}
-        <p class="mt-2 text-rose-200">错误：{{ clip.error_message }}</p>
+    <a href="/clips/{{ clip.id }}?library_id={{ current_library_id }}" class="block">
+      <div class="relative aspect-[16/10] overflow-hidden bg-[#222228]">
+        {% if clip.cover_url %}
+        <img src="{{ clip.cover_url }}" alt="{{ clip.filename }}" class="h-full w-full object-cover">
+        {% else %}
+        <div class="flex h-full items-center justify-center text-sm text-[#8A8A92]">暂无封面</div>
         {% endif %}
+        <div class="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/90 via-black/55 to-transparent px-4 pb-4 pt-10">
+          <div class="flex items-center justify-between gap-3">
+            <span class="text-[11px] uppercase tracking-[0.12em] text-[#8A8A92]">{{ clip.scene }}</span>
+            <span class="rounded-full border border-white/10 px-2 py-0.5 text-[10px] text-white/80">{{ clip.status }}</span>
+          </div>
+        </div>
       </div>
-    </div>
+
+      <div class="p-4">
+        <p class="line-clamp-2 text-[17px] font-medium leading-6 tracking-[-0.01em] text-white">{{ clip.summary }}</p>
+      </div>
+    </a>
   </article>
   {% endfor %}
 </div>
 {% else %}
-<div class="rounded-3xl border border-dashed border-white/15 bg-white/5 px-6 py-16 text-center">
+<div class="rounded-[20px] border border-dashed border-[#2A2A30] bg-[#17171A] px-6 py-16 text-center">
   <p class="text-lg font-medium text-white">没有匹配到素材</p>
-  <p class="mt-3 text-sm text-slate-400">你可以换个关键词，或者清空标签筛选后再试。</p>
+  <p class="mt-3 text-sm text-[#8A8A92]">你可以换个关键词，或者清空标签筛选后再试。</p>
 </div>
 {% endif %}

@@ -1,0 +1,255 @@
+{% extends "base.html" %}
+{% block content %}
+<main class="mx-auto max-w-7xl px-4 py-6 sm:px-6 lg:px-8">
+  <section class="overflow-hidden rounded-[24px] border border-[#2A2A30] bg-[#0E0E10] p-5">
+    <div class="mb-5 flex items-center justify-between gap-4">
+      <div class="flex items-center gap-2 text-xs text-[#8A8A92]">
+        <a href="{{ return_url }}" class="transition hover:text-white">素材库</a>
+        <span class="text-[#3A3A42]">/</span>
+        <span class="text-white">{{ clip.filename }}</span>
+      </div>
+      <div class="flex items-center gap-2">
+        <a href="{{ return_url }}" class="rounded-lg border border-[#3A3A42] px-3 py-1.5 text-xs text-white transition hover:border-white/20">&larr; 返回列表</a>
+      </div>
+    </div>
+
+    <div class="grid gap-5 lg:grid-cols-[1.3fr_1fr]">
+      <div>
+        <div class="relative mb-3 aspect-[16/9] overflow-hidden rounded-[10px] bg-[#17171A]">
+          {% if clip.media_url %}
+          <video id="clip-player" controls playsinline preload="metadata" poster="{{ clip.cover_url }}" class="h-full w-full object-cover">
+            <source src="{{ clip.media_url }}" {% if clip.media_type %}type="{{ clip.media_type }}"{% endif %}>
+            当前浏览器无法直接播放这个视频。
+          </video>
+          {% elif clip.cover_url %}
+          <img src="{{ clip.cover_url }}" alt="{{ clip.filename }}" class="h-full w-full object-cover">
+          <div class="absolute inset-0 flex items-center justify-center">
+            <div class="flex h-14 w-14 items-center justify-center rounded-full border border-white/25 bg-white/10 backdrop-blur">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none">
+                <path d="M8 5V19L19 12L8 5Z" fill="white"/>
+              </svg>
+            </div>
+          </div>
+          {% else %}
+          <div class="flex h-full items-center justify-center text-sm text-[#8A8A92]">暂无封面</div>
+          {% endif %}
+
+          <div class="absolute left-3 top-3 rounded-md bg-black/60 px-2 py-1 text-[10px] uppercase tracking-[0.08em] text-white">
+            {{ clip.scene }}
+          </div>
+        </div>
+
+        {% if clip.media_url %}
+        <div class="mb-4 flex items-center gap-3 text-xs text-[#8A8A92]">
+          <span class="rounded-lg border border-[#2A2A30] px-3 py-1.5 text-white/70">
+            当前播放：浏览器预览版
+          </span>
+          <a href="{{ clip.media_url }}" target="_blank" rel="noreferrer" class="rounded-lg border border-[#3A3A42] px-3 py-1.5 text-white transition hover:border-white/20">
+            单独打开预览
+          </a>
+          <a href="/media/{{ clip.id }}" target="_blank" rel="noreferrer" class="rounded-lg border border-[#3A3A42] px-3 py-1.5 text-white transition hover:border-white/20">
+            单独打开原视频
+          </a>
+          <a href="/media/{{ clip.id }}" download="{{ clip.filename }}" class="rounded-lg border border-[#3A3A42] px-3 py-1.5 text-white transition hover:border-white/20">
+            下载原视频
+          </a>
+        </div>
+        {% endif %}
+
+        {% if clip.media_error_message %}
+        <div class="mb-4 rounded-[8px] border border-[#5A2525] bg-[#2A1515] px-4 py-3 text-sm text-[#f2b4b4]">
+          {{ clip.media_error_message }}
+        </div>
+        {% endif %}
+
+        {% if clip.keyframe_urls %}
+        <div class="mb-4">
+          <p class="mb-2 text-[10px] uppercase tracking-[0.08em] text-[#8A8A92]">Key moments</p>
+          <div class="grid grid-cols-3 gap-2 sm:grid-cols-6">
+            {% for frame_url in clip.keyframe_urls %}
+            <div class="aspect-[16/9] overflow-hidden rounded-[6px] border {% if loop.first %}border-[#D7FF3E]{% else %}border-transparent{% endif %} bg-[#17171A]">
+              <img src="{{ frame_url }}" alt="关键帧 {{ loop.index }}" class="h-full w-full object-cover">
+            </div>
+            {% endfor %}
+          </div>
+        </div>
+        {% endif %}
+
+        {% if similar_clips %}
+        <div class="rounded-[10px] bg-[#17171A] p-3">
+          <div class="mb-3 flex items-center justify-between">
+            <div class="flex items-center gap-2">
+              <div class="flex h-4 w-4 items-center justify-center rounded-[4px] border border-[#D7FF3E]">
+                <div class="h-2 w-2 rounded-[2px] bg-[#D7FF3E]"></div>
+              </div>
+              <span class="text-sm font-medium text-white">相似素材</span>
+              <span class="text-xs text-[#8A8A92]">同场景 {{ similar_clips|length }} 条</span>
+            </div>
+          </div>
+          {% if clip.comparison_scores %}
+          <div class="mb-3 rounded-[8px] border border-white/5 bg-[#111114] px-3 py-2">
+            <p class="text-[10px] uppercase tracking-[0.08em] text-[#8A8A92]">当前素材对比分</p>
+            <div class="mt-2 flex flex-wrap gap-2">
+              <span class="rounded-full bg-[#D7FF3E] px-3 py-1 text-[11px] font-medium text-[#0E0E10]">
+                清晰度 {{ "%.1f"|format(clip.comparison_scores.sharpness_score) }}
+              </span>
+            </div>
+          </div>
+          {% endif %}
+          <div class="grid grid-cols-1 gap-3 sm:grid-cols-3">
+            {% for item in similar_clips %}
+            <a href="/clips/{{ item.id }}?library_id={{ current_library_id }}" class="block">
+              <div class="aspect-[16/9] overflow-hidden rounded-[6px] bg-[#222228]">
+                {% if item.cover_url %}
+                <img src="{{ item.cover_url }}" alt="{{ item.filename }}" class="h-full w-full object-cover">
+                {% endif %}
+              </div>
+              {% if item.comparison_scores %}
+              <div class="mt-2 flex flex-wrap gap-2">
+                <span class="rounded-full bg-white/8 px-2 py-1 text-[10px] text-white">
+                  清晰度 {{ "%.1f"|format(item.comparison_scores.sharpness_score) }}
+                </span>
+              </div>
+              {% endif %}
+              <p class="mt-2 line-clamp-2 text-[11px] leading-5 text-[#8A8A92]">{{ item.summary }}</p>
+            </a>
+            {% endfor %}
+          </div>
+        </div>
+        {% endif %}
+      </div>
+
+      <div>
+        <div class="mb-5">
+          <div class="mb-2 flex items-center gap-2">
+            <div class="h-[5px] w-[5px] rounded-full bg-[#D7FF3E]"></div>
+            <span class="text-[10px] uppercase tracking-[0.08em] text-[#8A8A92]">AI summary</span>
+          </div>
+          <p class="text-[15px] leading-6 tracking-[-0.01em] text-white">{{ clip.summary }}</p>
+          <p class="mt-2 text-sm leading-6 text-[#8A8A92]">
+            场景：{{ clip.scene }}{% if clip.subjects %} · 主体：{{ clip.subjects|join("、") }}{% endif %}{% if clip.actions %} · 动作：{{ clip.actions|join("、") }}{% endif %}
+          </p>
+        </div>
+
+        <div class="mb-5">
+          <p class="mb-2 text-[10px] uppercase tracking-[0.08em] text-[#8A8A92]">Tags</p>
+          <div class="flex flex-wrap gap-2">
+            {% for tag in clip.tags %}
+            <span class="rounded-full {% if loop.first %}bg-[#D7FF3E] text-[#0E0E10]{% else %}bg-white/8 text-white{% endif %} px-3 py-1 text-[11px] {% if loop.first %}font-medium{% endif %}">
+              {{ tag }}
+            </span>
+            {% endfor %}
+          </div>
+        </div>
+
+        <div class="mb-5">
+          <div class="mb-2 flex items-center justify-between">
+            <div class="flex items-center gap-2">
+              <div class="h-[5px] w-[5px] rounded-full bg-[#D7FF3E]"></div>
+              <span class="text-[10px] uppercase tracking-[0.08em] text-[#8A8A92]">分析明细</span>
+            </div>
+            <span class="text-[10px] text-[#8A8A92]">{{ clip.status }}</span>
+          </div>
+          <div class="rounded-[8px] bg-[#17171A] p-4">
+            <div class="grid grid-cols-[auto_1fr] gap-x-4 gap-y-2 text-[11px]">
+              <span class="text-[#8A8A92]">主体</span>
+              <span class="text-white">{{ clip.subjects|join("、") if clip.subjects else "—" }}</span>
+              <span class="text-[#8A8A92]">动作</span>
+              <span class="text-white">{{ clip.actions|join("、") if clip.actions else "—" }}</span>
+              <span class="text-[#8A8A92]">运动</span>
+              <span class="text-white">{{ "是" if clip.has_motion else "否" }}</span>
+              <span class="text-[#8A8A92]">状态</span>
+              <span class="text-white">{{ clip.status }}</span>
+            </div>
+          </div>
+        </div>
+
+        {% include "partials/clip_transcript.html" %}
+
+        <div class="mb-5">
+          <p class="mb-2 text-[10px] uppercase tracking-[0.08em] text-[#8A8A92]">File</p>
+          <div class="grid grid-cols-[auto_1fr] gap-x-4 gap-y-2 text-[11px]">
+            <span class="text-[#8A8A92]">所属素材库</span>
+            <a href="/?library_id={{ clip.library_id }}" class="text-white transition hover:text-[#D7FF3E]">{{ clip.library_name }}</a>
+            <span class="text-[#8A8A92]">Name</span>
+            <span class="font-mono text-white">{{ clip.filename }}</span>
+            <span class="text-[#8A8A92]">Size</span>
+            <span class="text-white">{{ clip.file_size_text }}</span>
+            <span class="text-[#8A8A92]">Shot</span>
+            <span class="text-white">{{ clip.shot_time_text }}</span>
+            <span class="text-[#8A8A92]">Path</span>
+            <span class="break-all text-white">{{ clip.filepath }}</span>
+          </div>
+        </div>
+
+        {% if clip.visual_error_message %}
+        <div class="rounded-[8px] border border-[#5A2525] bg-[#2A1515] px-4 py-3 text-sm text-[#f2b4b4]">
+          视觉摘要失败：{{ clip.visual_error_message }}
+        </div>
+        {% endif %}
+      </div>
+    </div>
+  </section>
+</main>
+<script>
+  (() => {
+    const video = document.getElementById("clip-player");
+    if (!video) return;
+
+    function getRows() {
+      return Array.from(document.querySelectorAll(".transcript-row"));
+    }
+
+    function setActiveRow(activeRow) {
+      const rows = getRows();
+      rows.forEach((row) => {
+        const isActive = row === activeRow;
+        row.classList.toggle("border-[#D7FF3E]", isActive);
+        row.classList.toggle("bg-[#252514]", isActive);
+        row.classList.toggle("shadow-[0_0_0_1px_rgba(215,255,62,0.15)]", isActive);
+        const marker = row.querySelector(".transcript-marker");
+        const time = row.querySelector(".transcript-time");
+        const text = row.querySelector(".transcript-text");
+        if (marker) marker.classList.toggle("hidden", !isActive);
+        if (time) {
+          time.classList.toggle("bg-[#D7FF3E]", isActive);
+          time.classList.toggle("text-[#0E0E10]", isActive);
+          time.classList.toggle("bg-white/8", !isActive);
+          time.classList.toggle("text-[#D7FF3E]", !isActive);
+        }
+        if (text) {
+          text.classList.toggle("text-[#F5FFD1]", isActive);
+          text.classList.toggle("font-medium", isActive);
+          text.classList.toggle("text-white", !isActive);
+        }
+      });
+    }
+
+    function findCurrentRow(currentMs) {
+      const rows = getRows();
+      return rows.find((row) => {
+        const startMs = Number(row.dataset.startMs || "0");
+        const endMs = Number(row.dataset.endMs || startMs);
+        return currentMs >= startMs && currentMs <= Math.max(endMs, startMs + 500);
+      });
+    }
+
+    document.addEventListener("click", (event) => {
+      const target = event.target;
+      if (!(target instanceof HTMLElement)) return;
+      const row = target.closest(".transcript-row");
+      if (!row) return;
+      const startMs = Number(row.dataset.startMs || "0");
+      video.currentTime = Math.max(startMs / 1000, 0);
+      setActiveRow(row);
+      video.play().catch(() => {});
+    });
+
+    video.addEventListener("timeupdate", () => {
+      const currentMs = Math.floor(video.currentTime * 1000);
+      const activeRow = findCurrentRow(currentMs);
+      setActiveRow(activeRow || null);
+    });
+  })();
+</script>
+{% endblock %}

@@ -11,6 +11,7 @@ os.environ["PATH"] = os.environ.get("PATH", "") + ":/opt/homebrew/bin:/usr/local
 
 # 支持的视频扩展名（统一转小写比较）
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm"}
+FRAME_EXTENSIONS = (".png", ".jpg", ".jpeg")
 
 
 def scan_folder(folder: Path) -> list[Path]:
@@ -29,7 +30,14 @@ def build_video_hash(video_path: Path) -> str:
 
 def get_keyframe_paths(frame_dir: Path, count: int = 6) -> list[Path]:
     """只返回 0.jpg ~ N.jpg，避免把 cover.jpg 混进关键帧列表。"""
-    return [frame_dir / f"{index}.jpg" for index in range(count) if (frame_dir / f"{index}.jpg").exists()]
+    frame_paths: list[Path] = []
+    for index in range(count):
+        for suffix in FRAME_EXTENSIONS:
+            candidate = frame_dir / f"{index}{suffix}"
+            if candidate.exists():
+                frame_paths.append(candidate)
+                break
+    return frame_paths
 
 
 def extract_keyframes(
@@ -61,12 +69,14 @@ def extract_keyframes(
     positions = [duration * p for p in [0.10, 0.25, 0.40, 0.55, 0.70, 0.85]][:count]
 
     for i, t in enumerate(positions):
-        out_path = frame_dir / f"{i}.jpg"
+        out_path = frame_dir / f"{i}.png"
+        stream = ffmpeg.input(str(video_path), ss=t)
         (
-            ffmpeg
-            .input(str(video_path), ss=t)
-            .filter("scale", 480, -1)
-            .output(str(out_path), vframes=1, **{"q:v": 3})
+            stream
+            .output(
+                str(out_path),
+                vframes=1,
+            )
             .overwrite_output()
             .run(quiet=True)
         )

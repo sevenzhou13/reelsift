@@ -1,10 +1,7 @@
-/* 自定义样式：补充页面基底与滚动条细节 */
+/* 自定义样式：统一深色粗线条风格 */
 
 body {
-  background:
-    radial-gradient(circle at top left, rgba(34, 211, 238, 0.18), transparent 30%),
-    radial-gradient(circle at top right, rgba(56, 189, 248, 0.12), transparent 24%),
-    linear-gradient(180deg, #020617 0%, #020617 100%);
+  background: #09090b;
 }
 
 ::-webkit-scrollbar {
@@ -15,4 +12,49 @@ body {
 ::-webkit-scrollbar-thumb {
   background: rgba(148, 163, 184, 0.35);
   border-radius: 999px;
+}
+
+[data-clip-card] {
+  transform: translateY(0);
+}
+
+[data-clip-card].is-selected {
+  border-color: rgba(215, 255, 62, 0.8);
+  box-shadow:
+    0 0 0 2px rgba(215, 255, 62, 0.18),
+    0 24px 70px rgba(0, 0, 0, 0.42);
+  transform: translateY(-2px);
+}
+
+[data-clip-card].is-selected .selection-dot {
+  border-color: rgba(215, 255, 62, 0.95);
+  background: rgba(215, 255, 62, 0.95);
+  color: #0e0e10;
+}
+
+.export-loading-bar {
+  width: 38%;
+  animation: export-loading 1.6s ease-in-out infinite;
+}
+
+.processing-loading-bar {
+  width: 34%;
+  animation: export-loading 1.4s ease-in-out infinite;
+}
+
+@keyframes export-loading {
+  0% {
+    margin-left: -10%;
+    width: 18%;
+  }
+
+  50% {
+    margin-left: 28%;
+    width: 44%;
+  }
+
+  100% {
+    margin-left: 92%;
+    width: 18%;
+  }
 }

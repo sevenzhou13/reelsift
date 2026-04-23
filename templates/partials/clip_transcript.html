@@ -1,0 +1,83 @@
+<div
+  id="transcript-panel"
+  class="mb-5"
+  {% if clip.transcript_status == "processing" %}
+  hx-get="/clips/{{ clip.id }}/transcript"
+  hx-trigger="every 2s"
+  hx-target="#transcript-panel"
+  hx-swap="outerHTML"
+  {% endif %}
+>
+  <div class="mb-2 flex items-center justify-between">
+    <div class="flex items-center gap-2">
+      <div class="h-[5px] w-[5px] rounded-full bg-[#D7FF3E]"></div>
+      <span class="text-[10px] uppercase tracking-[0.08em] text-[#8A8A92]">Transcript</span>
+    </div>
+    <span class="text-[10px] text-[#8A8A92]">
+      {% if clip.transcripts %}
+      {{ clip.transcripts|length }} 段口播
+      {% elif clip.transcript_status == "processing" %}
+      识别中
+      {% elif clip.transcript_available %}
+      未识别
+      {% else %}
+      未配置口播识别
+      {% endif %}
+    </span>
+  </div>
+  <div class="rounded-[8px] bg-[#17171A] p-3">
+    {% if clip.transcripts %}
+    <div class="max-h-[280px] space-y-2 overflow-y-auto pr-1">
+      {% for item in clip.transcripts %}
+      <button
+        type="button"
+        class="transcript-row relative flex w-full items-start gap-3 rounded-[8px] border border-transparent bg-[#111114] px-3 py-2 text-left transition hover:border-[#D7FF3E]/30 hover:bg-[#141418]"
+        data-start-ms="{{ item.start_ms }}"
+        data-end-ms="{{ item.end_ms }}"
+      >
+        <span class="transcript-marker absolute left-0 top-2 bottom-2 hidden w-[3px] rounded-full bg-[#D7FF3E]"></span>
+        <span class="transcript-time shrink-0 rounded-full bg-white/8 px-2 py-1 text-[10px] font-medium text-[#D7FF3E]">{{ item.time_text }}</span>
+        <span class="transcript-text text-[12px] leading-5 text-white">{{ item.text }}</span>
+      </button>
+      {% endfor %}
+    </div>
+    {% elif clip.transcript_status == "processing" %}
+    <div class="space-y-3">
+      <p class="text-sm text-[#8A8A92]">正在单独识别这条视频的口播，不影响其他素材浏览和筛选。</p>
+      <div class="h-2 overflow-hidden rounded-full bg-white/5">
+        <div class="h-full w-1/2 animate-pulse rounded-full bg-[#D7FF3E]"></div>
+      </div>
+    </div>
+    {% else %}
+    <div class="space-y-3">
+      {% if clip.transcript_error_message %}
+      <div class="rounded-[8px] border border-[#5A2525] bg-[#2A1515] px-3 py-2 text-sm text-[#f2b4b4]">
+        口播识别失败：{{ clip.transcript_error_message }}
+      </div>
+      {% elif clip.transcript_status == "empty" %}
+      <p class="text-sm text-[#8A8A92]">这条视频暂时没有识别到可用口播结果。</p>
+      {% elif not clip.transcript_available %}
+      <p class="text-sm text-[#8A8A92]">还没有配置火山语音识别凭证，当前无法展示口播转写。</p>
+      {% else %}
+      <p class="text-sm text-[#8A8A92]">当前还没有口播结果，你可以单独触发一次识别。</p>
+      {% endif %}
+
+      {% if clip.transcript_available %}
+      <button
+        type="button"
+        hx-post="/clips/{{ clip.id }}/transcript/run"
+        hx-target="#transcript-panel"
+        hx-swap="outerHTML"
+        class="inline-flex items-center justify-center rounded-lg border border-[#3A3A42] px-3 py-2 text-sm text-white transition hover:border-white/20"
+      >
+        {% if clip.transcript_error_message %}
+        重新识别口播
+        {% else %}
+        识别口播
+        {% endif %}
+      </button>
+      {% endif %}
+    </div>
+    {% endif %}
+  </div>
+</div>
