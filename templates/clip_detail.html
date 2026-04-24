@@ -7,6 +7,13 @@
         <a href="{{ return_url }}" class="transition hover:text-white">素材库</a>
         <span class="text-[#3A3A42]">/</span>
         <span class="text-white">{{ clip.filename }}</span>
+        <button
+          type="button"
+          id="open-delete-modal"
+          class="ml-2 inline-flex items-center rounded-full border border-[#4A2A2A] bg-[#1B1214] px-2.5 py-1 text-[10px] uppercase tracking-[0.12em] text-[#D99A92] transition hover:border-[#FF6B57] hover:text-[#FFB4A9]"
+        >
+          trash
+        </button>
       </div>
       <div class="flex items-center gap-2">
         <a href="{{ return_url }}" class="rounded-lg border border-[#3A3A42] px-3 py-1.5 text-xs text-white transition hover:border-white/20">&larr; 返回列表</a>
@@ -16,6 +23,24 @@
     <div class="grid gap-5 lg:grid-cols-[1.3fr_1fr]">
       <div>
         <div class="relative mb-3 aspect-[16/9] overflow-hidden rounded-[10px] bg-[#17171A]">
+          {% if previous_clip_id %}
+          <a
+            href="/clips/{{ previous_clip_id }}?library_id={{ current_library_id }}"
+            class="absolute left-4 top-1/2 z-20 flex h-12 w-12 -translate-y-1/2 items-center justify-center rounded-full border border-[#D7FF3E]/30 bg-[#0B0B0D]/80 text-2xl font-light text-[#F4FFD2] shadow-[0_0_30px_rgba(0,0,0,0.32)] backdrop-blur transition hover:border-[#D7FF3E] hover:text-[#D7FF3E]"
+            aria-label="查看上一条素材"
+          >
+            &#8249;
+          </a>
+          {% endif %}
+          {% if next_clip_id %}
+          <a
+            href="/clips/{{ next_clip_id }}?library_id={{ current_library_id }}"
+            class="absolute right-4 top-1/2 z-20 flex h-12 w-12 -translate-y-1/2 items-center justify-center rounded-full border border-[#D7FF3E]/30 bg-[#0B0B0D]/80 text-2xl font-light text-[#F4FFD2] shadow-[0_0_30px_rgba(0,0,0,0.32)] backdrop-blur transition hover:border-[#D7FF3E] hover:text-[#D7FF3E]"
+            aria-label="查看下一条素材"
+          >
+            &#8250;
+          </a>
+          {% endif %}
           {% if clip.media_url %}
           <video id="clip-player" controls playsinline preload="metadata" poster="{{ clip.cover_url }}" class="h-full w-full object-cover">
             <source src="{{ clip.media_url }}" {% if clip.media_type %}type="{{ clip.media_type }}"{% endif %}>
@@ -24,10 +49,12 @@
           {% elif clip.cover_url %}
           <img src="{{ clip.cover_url }}" alt="{{ clip.filename }}" class="h-full w-full object-cover">
           <div class="absolute inset-0 flex items-center justify-center">
-            <div class="flex h-14 w-14 items-center justify-center rounded-full border border-white/25 bg-white/10 backdrop-blur">
-              <svg width="20" height="20" viewBox="0 0 24 24" fill="none">
-                <path d="M8 5V19L19 12L8 5Z" fill="white"/>
-              </svg>
+            <div class="rounded-full border border-white/20 bg-black/55 px-4 py-2 text-xs text-white backdrop-blur">
+              {% if clip.preview_status == "processing" or clip.preview_status == "pending" %}
+              预览生成中
+              {% else %}
+              预览暂不可用
+              {% endif %}
             </div>
           </div>
           {% else %}
@@ -54,6 +81,15 @@
             下载原视频
           </a>
         </div>
+        {% elif clip.preview_status == "processing" or clip.preview_status == "pending" %}
+        <div class="mb-4 flex items-center gap-3 text-xs text-[#8A8A92]">
+          <span class="rounded-lg border border-[#2A2A30] px-3 py-1.5 text-white/70">
+            预览生成中，稍后可播放
+          </span>
+          <a href="/media/{{ clip.id }}" target="_blank" rel="noreferrer" class="rounded-lg border border-[#3A3A42] px-3 py-1.5 text-white transition hover:border-white/20">
+            单独打开原视频
+          </a>
+        </div>
         {% endif %}
 
         {% if clip.media_error_message %}
@@ -77,6 +113,12 @@
 
         {% if similar_clips %}
         <div class="rounded-[10px] bg-[#17171A] p-3">
+          {% set compare_ids = [clip.id] %}
+          {% for similar_clip in similar_clips %}
+            {% if compare_ids|length < 6 %}
+              {% set _ = compare_ids.append(similar_clip.id) %}
+            {% endif %}
+          {% endfor %}
           <div class="mb-3 flex items-center justify-between">
             <div class="flex items-center gap-2">
               <div class="flex h-4 w-4 items-center justify-center rounded-[4px] border border-[#D7FF3E]">
@@ -85,6 +127,12 @@
               <span class="text-sm font-medium text-white">相似素材</span>
               <span class="text-xs text-[#8A8A92]">同场景 {{ similar_clips|length }} 条</span>
             </div>
+            <a
+              href="/compare?library_id={{ current_library_id }}&ids={{ compare_ids|join(',') }}"
+              class="rounded-full border border-[#3A3A42] px-3 py-1.5 text-[11px] uppercase tracking-[0.08em] text-white transition hover:border-[#D7FF3E] hover:text-[#D7FF3E]"
+            >
+              对比这组
+            </a>
           </div>
           {% if clip.comparison_scores %}
           <div class="mb-3 rounded-[8px] border border-white/5 bg-[#111114] px-3 py-2">
@@ -94,6 +142,14 @@
                 清晰度 {{ "%.1f"|format(clip.comparison_scores.sharpness_score) }}
               </span>
             </div>
+          </div>
+          {% elif clip.comparison_status == "processing" or clip.comparison_status == "pending" %}
+          <div class="mb-3 rounded-[8px] border border-white/5 bg-[#111114] px-3 py-2">
+            <p class="text-sm text-[#8A8A92]">对比分分析中</p>
+          </div>
+          {% elif clip.comparison_error_message %}
+          <div class="mb-3 rounded-[8px] border border-[#5A2525] bg-[#2A1515] px-3 py-2 text-sm text-[#f2b4b4]">
+            {{ clip.comparison_error_message }}
           </div>
           {% endif %}
           <div class="grid grid-cols-1 gap-3 sm:grid-cols-3">
@@ -110,6 +166,10 @@
                   清晰度 {{ "%.1f"|format(item.comparison_scores.sharpness_score) }}
                 </span>
               </div>
+              {% elif item.comparison_status == "processing" or item.comparison_status == "pending" %}
+              <p class="mt-2 text-[10px] text-[#8A8A92]">分析中</p>
+              {% elif item.comparison_status == "failed" %}
+              <p class="mt-2 text-[10px] text-[#f2b4b4]">不可用</p>
               {% endif %}
               <p class="mt-2 line-clamp-2 text-[11px] leading-5 text-[#8A8A92]">{{ item.summary }}</p>
             </a>
@@ -125,21 +185,108 @@
             <div class="h-[5px] w-[5px] rounded-full bg-[#D7FF3E]"></div>
             <span class="text-[10px] uppercase tracking-[0.08em] text-[#8A8A92]">AI summary</span>
           </div>
-          <p class="text-[15px] leading-6 tracking-[-0.01em] text-white">{{ clip.summary }}</p>
-          <p class="mt-2 text-sm leading-6 text-[#8A8A92]">
-            场景：{{ clip.scene }}{% if clip.subjects %} · 主体：{{ clip.subjects|join("、") }}{% endif %}{% if clip.actions %} · 动作：{{ clip.actions|join("、") }}{% endif %}
-          </p>
+          <div id="summary-display" class="{% if edit_error %}hidden{% endif %}">
+            <div class="flex items-start gap-3">
+              <p class="flex-1 text-[15px] leading-6 tracking-[-0.01em] text-white">{{ clip.summary }}</p>
+              <button
+                type="button"
+                data-toggle-target="summary-editor"
+                data-hide-target="summary-display"
+                class="mt-0.5 inline-flex items-center gap-1 rounded-full border border-[#2D2D34] bg-[#17171A] px-2.5 py-1 text-[10px] uppercase tracking-[0.12em] text-[#8A8A92] transition hover:border-[#D7FF3E] hover:text-[#D7FF3E]"
+                aria-label="编辑摘要"
+              >
+                <span class="text-[11px] leading-none">edit</span>
+              </button>
+            </div>
+          </div>
+          <form
+            id="summary-editor"
+            action="/clips/{{ clip.id }}/summary"
+            method="post"
+            class="space-y-3 {% if not edit_error %}hidden{% endif %}"
+          >
+            <input type="hidden" name="library_id" value="{{ current_library_id }}">
+            <textarea
+              name="summary"
+              rows="4"
+              class="w-full rounded-[14px] border border-[#313139] bg-[#17171A] px-4 py-3 text-sm leading-6 text-white outline-none placeholder:text-[#5A5A62] focus:border-[#D7FF3E]"
+            >{{ clip.summary }}</textarea>
+            <div class="flex items-center justify-between gap-3">
+              <p class="text-[11px] text-[#8A8A92]">同一素材库中摘要不能重名。</p>
+              <div class="flex items-center gap-2">
+                <button
+                  type="button"
+                  data-cancel-target="summary-editor"
+                  data-show-target="summary-display"
+                  class="rounded-full border border-[#303038] px-3 py-1.5 text-[11px] uppercase tracking-[0.08em] text-[#8A8A92] transition hover:border-white/20 hover:text-white"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  class="rounded-full bg-[#D7FF3E] px-4 py-1.5 text-[11px] font-medium uppercase tracking-[0.08em] text-[#0E0E10]"
+                >
+                  Save
+                </button>
+              </div>
+            </div>
+          </form>
+          {% if edit_error %}
+          <div class="mt-3 rounded-[10px] border border-[#5A2525] bg-[#2A1515] px-3 py-2 text-sm text-[#f2b4b4]">
+            {{ edit_error }}
+          </div>
+          {% endif %}
         </div>
 
         <div class="mb-5">
-          <p class="mb-2 text-[10px] uppercase tracking-[0.08em] text-[#8A8A92]">Tags</p>
-          <div class="flex flex-wrap gap-2">
+          <div class="mb-2 flex items-center justify-between gap-3">
+            <p class="text-[10px] uppercase tracking-[0.08em] text-[#8A8A92]">Tags</p>
+          </div>
+          <div id="tags-display" class="flex flex-wrap gap-2">
             {% for tag in clip.tags %}
             <span class="rounded-full {% if loop.first %}bg-[#D7FF3E] text-[#0E0E10]{% else %}bg-white/8 text-white{% endif %} px-3 py-1 text-[11px] {% if loop.first %}font-medium{% endif %}">
               {{ tag }}
             </span>
             {% endfor %}
+            <button
+              type="button"
+              data-toggle-target="tags-editor"
+              data-hide-target="tags-display"
+              class="rounded-full border border-dashed border-[#4C4C55] bg-transparent px-3 py-1 text-[11px] uppercase tracking-[0.08em] text-[#8A8A92] transition hover:border-[#D7FF3E] hover:text-[#D7FF3E]"
+            >
+              + add
+            </button>
           </div>
+          <form
+            id="tags-editor"
+            action="/clips/{{ clip.id }}/tags"
+            method="post"
+            class="mt-3 space-y-3 hidden"
+          >
+            <input type="hidden" name="library_id" value="{{ current_library_id }}">
+            <input
+              type="text"
+              name="new_tags"
+              placeholder="多个标签用逗号分隔"
+              class="w-full rounded-[14px] border border-[#313139] bg-[#17171A] px-4 py-3 text-sm text-white outline-none placeholder:text-[#5A5A62] focus:border-[#D7FF3E]"
+            >
+            <div class="flex items-center justify-end gap-2">
+              <button
+                type="button"
+                data-cancel-target="tags-editor"
+                data-show-target="tags-display"
+                class="rounded-full border border-[#303038] px-3 py-1.5 text-[11px] uppercase tracking-[0.08em] text-[#8A8A92] transition hover:border-white/20 hover:text-white"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                class="rounded-full bg-[#D7FF3E] px-4 py-1.5 text-[11px] font-medium uppercase tracking-[0.08em] text-[#0E0E10]"
+              >
+                Save Tag
+              </button>
+            </div>
+          </form>
         </div>
 
         <div class="mb-5">
@@ -166,6 +313,61 @@
 
         {% include "partials/clip_transcript.html" %}
 
+        <div class="mb-5 rounded-[16px] border border-[#2B2B31] bg-[#111114] p-4">
+          <div class="mb-3 flex items-center gap-2">
+            <div class="h-[5px] w-[5px] rounded-full bg-[#D7FF3E]"></div>
+            <span class="text-[10px] uppercase tracking-[0.14em] text-[#8A8A92]">My Note</span>
+          </div>
+          <div id="note-display">
+            <div class="rounded-[14px] border border-[#313139] bg-[#17171A] px-4 py-4">
+              {% if clip.user_note %}
+              <p class="whitespace-pre-wrap text-sm leading-6 text-white">{{ clip.user_note }}</p>
+              {% else %}
+              <p class="text-sm italic leading-6 text-[#6B6B74]">Write your thoughts, usage ideas, edit direction...</p>
+              {% endif %}
+            </div>
+            <div class="mt-3 flex items-center justify-between gap-3">
+              <p class="text-[11px] italic text-[#6B6B74]">MY NOTE 只记录你的人工判断，不会覆盖 AI 摘要。</p>
+              <button
+                type="button"
+                data-toggle-target="note-editor"
+                data-hide-target="note-display"
+                class="rounded-full border border-[#2D2D34] bg-[#17171A] px-3 py-1.5 text-[10px] uppercase tracking-[0.12em] text-[#8A8A92] transition hover:border-[#D7FF3E] hover:text-[#D7FF3E]"
+              >
+                edit note
+              </button>
+            </div>
+          </div>
+          <form action="/clips/{{ clip.id }}/note" method="post" id="note-editor" class="space-y-3 hidden">
+            <input type="hidden" name="library_id" value="{{ current_library_id }}">
+            <textarea
+              name="note"
+              rows="6"
+              placeholder="Write your thoughts, usage ideas, edit direction..."
+              class="w-full rounded-[14px] border border-[#313139] bg-[#17171A] px-4 py-3 text-sm leading-6 text-white outline-none placeholder:text-[#6B6B74] focus:border-[#D7FF3E]"
+            >{{ clip.user_note or "" }}</textarea>
+            <div class="flex items-center justify-between gap-3">
+              <p class="text-[11px] italic text-[#6B6B74]">MY NOTE 只记录你的人工判断，不会覆盖 AI 摘要。</p>
+              <div class="flex items-center gap-2">
+                <button
+                  type="button"
+                  data-cancel-target="note-editor"
+                  data-show-target="note-display"
+                  class="rounded-full border border-[#303038] px-3 py-1.5 text-[11px] uppercase tracking-[0.08em] text-[#8A8A92] transition hover:border-white/20 hover:text-white"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  class="rounded-full border border-[#3A3A42] px-4 py-2 text-[11px] uppercase tracking-[0.08em] text-white transition hover:border-[#D7FF3E] hover:text-[#D7FF3E]"
+                >
+                  Save Note
+                </button>
+              </div>
+            </div>
+          </form>
+        </div>
+
         <div class="mb-5">
           <p class="mb-2 text-[10px] uppercase tracking-[0.08em] text-[#8A8A92]">File</p>
           <div class="grid grid-cols-[auto_1fr] gap-x-4 gap-y-2 text-[11px]">
@@ -191,8 +393,94 @@
     </div>
   </section>
 </main>
+<div id="delete-modal" class="fixed inset-0 z-[70] hidden">
+  <div class="absolute inset-0 bg-black/70 backdrop-blur-sm"></div>
+  <div class="relative flex min-h-screen items-center justify-center px-4 py-8">
+    <div class="w-full max-w-[420px] overflow-hidden rounded-[24px] border border-[#3A2426] bg-[#110F11] shadow-[0_40px_120px_rgba(0,0,0,0.55)]">
+      <div class="border-b border-[#23181A] px-5 pb-4 pt-5">
+        <p class="text-lg font-medium tracking-tight text-white">丢进垃圾箱？</p>
+        <p class="mt-2 text-sm leading-6 text-[#9E8B8B]">这条素材会从当前素材库里移除，并自动跳到下一条详情页。</p>
+      </div>
+      <div class="px-5 py-4">
+        <div class="rounded-[16px] border border-[#2B2325] bg-[#171214] px-4 py-3">
+          <p class="text-[10px] uppercase tracking-[0.16em] text-[#8A8A92]">Current Clip</p>
+          <p class="mt-2 text-sm text-white">{{ clip.filename }}</p>
+        </div>
+      </div>
+      <div class="flex items-center justify-end gap-2 border-t border-[#23181A] px-5 py-4">
+        <button
+          type="button"
+          id="close-delete-modal"
+          class="rounded-full border border-[#303038] px-4 py-2 text-[11px] uppercase tracking-[0.08em] text-[#8A8A92] transition hover:border-white/20 hover:text-white"
+        >
+          Cancel
+        </button>
+        <form action="/clips/{{ clip.id }}/delete" method="post">
+          <input type="hidden" name="library_id" value="{{ current_library_id }}">
+          <button
+            type="submit"
+            class="rounded-full border border-[#6A3530] bg-[#2B1718] px-4 py-2 text-[11px] uppercase tracking-[0.1em] text-[#FFB4A9] transition hover:border-[#FF6B57] hover:text-white"
+          >
+            Drop To Trash
+          </button>
+        </form>
+      </div>
+    </div>
+  </div>
+</div>
 <script>
   (() => {
+    const body = document.body;
+    const deleteModal = document.getElementById("delete-modal");
+    const openDeleteModal = document.getElementById("open-delete-modal");
+    const closeDeleteModal = document.getElementById("close-delete-modal");
+
+    function showDeleteModal() {
+      if (!deleteModal) return;
+      deleteModal.classList.remove("hidden");
+      body.classList.add("overflow-hidden");
+    }
+
+    function hideDeleteModal() {
+      if (!deleteModal) return;
+      deleteModal.classList.add("hidden");
+      body.classList.remove("overflow-hidden");
+    }
+
+    openDeleteModal?.addEventListener("click", showDeleteModal);
+    closeDeleteModal?.addEventListener("click", hideDeleteModal);
+    deleteModal?.addEventListener("click", (event) => {
+      if (event.target === deleteModal) {
+        hideDeleteModal();
+      }
+    });
+
+    function showEditor(editorId, displayId) {
+      const editor = document.getElementById(editorId);
+      const display = displayId ? document.getElementById(displayId) : null;
+      if (editor) editor.classList.remove("hidden");
+      if (display) display.classList.add("hidden");
+    }
+
+    function hideEditor(editorId, displayId) {
+      const editor = document.getElementById(editorId);
+      const display = displayId ? document.getElementById(displayId) : null;
+      if (editor) editor.classList.add("hidden");
+      if (display) display.classList.remove("hidden");
+    }
+
+    document.querySelectorAll("[data-toggle-target]").forEach((button) => {
+      button.addEventListener("click", () => {
+        showEditor(button.dataset.toggleTarget, button.dataset.hideTarget || "");
+      });
+    });
+
+    document.querySelectorAll("[data-cancel-target]").forEach((button) => {
+      button.addEventListener("click", () => {
+        hideEditor(button.dataset.cancelTarget, button.dataset.showTarget || "");
+      });
+    });
+
     const video = document.getElementById("clip-player");
     if (!video) return;
 

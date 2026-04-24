@@ -12,7 +12,7 @@
       </p>
     </div>
 
-    <div class="flex flex-wrap items-center gap-3">
+    <div id="primary-actions" class="flex flex-wrap items-center gap-3">
       <a
         href="/upload?library_id={{ current_library_id }}"
         class="inline-flex items-center justify-center rounded-xl border border-[#3A3A42] px-4 py-2.5 text-sm text-white transition hover:border-white/25"
@@ -20,34 +20,218 @@
         上传视频
       </a>
       <button
-        id="toggle-edit-mode"
-        type="button"
-        class="inline-flex items-center justify-center rounded-xl border border-[#3A3A42] px-4 py-2.5 text-sm text-white transition hover:border-white/25"
-      >
-        编辑
-      </button>
-      <form id="bulk-delete-form" action="/clips/delete" method="post" class="hidden items-center gap-3">
-        <input type="hidden" name="library_id" value="{{ current_library_id }}">
-        <button
-          type="submit"
-          id="bulk-delete-button"
-          class="inline-flex items-center justify-center rounded-xl border border-[#7a2d2d] bg-[#2A1515] px-4 py-2.5 text-sm text-[#f2b4b4] transition hover:border-[#b84a4a]"
-        >
-          删除已选素材
-        </button>
-      </form>
-      <button
-        id="open-export-modal"
+        id="open-selection-mode"
         type="button"
         class="inline-flex items-center justify-center rounded-xl bg-[#D7FF3E] px-4 py-2.5 text-sm font-medium text-[#0E0E10] transition hover:bg-[#e4ff7a]"
       >
-        打包已选素材
+        选择
       </button>
     </div>
   </section>
 
-  <section class="mb-6 rounded-[20px] border border-[#2A2A30] bg-[#17171A] p-4 sm:p-5">
-    <div class="mb-5">
+  <section id="selection-toolbar" class="mb-6 hidden rounded-[20px] border border-[#2A2A30] bg-[#17171A] px-4 py-4">
+    <div class="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+      <div>
+        <p id="selection-mode-label" class="text-[10px] uppercase tracking-[0.18em] text-[#8A8A92]">Selection Mode</p>
+        <p class="mt-2 text-sm text-white">已选 <span id="selected-count">0</span> 条素材</p>
+      </div>
+      <div class="flex flex-wrap items-center gap-3">
+        <button
+          id="select-all-button"
+          type="button"
+          class="rounded-xl border border-[#3A3A42] px-4 py-2.5 text-sm text-white transition hover:border-white/20"
+        >
+          全选
+        </button>
+        <button
+          id="clear-selection-button"
+          type="button"
+          class="rounded-xl border border-[#3A3A42] px-4 py-2.5 text-sm text-white transition hover:border-white/20"
+        >
+          清空
+        </button>
+        <button
+          id="compare-selection-button"
+          type="button"
+          class="rounded-xl border border-[#3A3A42] px-4 py-2.5 text-sm text-white transition hover:border-white/20"
+        >
+          对比已选
+        </button>
+        <form id="bulk-delete-form" action="/clips/delete" method="post" class="hidden items-center gap-3">
+          <input type="hidden" name="library_id" value="{{ current_library_id }}">
+          <input type="hidden" name="node_id" value="{{ current_node_id }}">
+          <button
+            type="submit"
+            id="bulk-delete-button"
+            class="inline-flex items-center justify-center rounded-xl border border-[#7a2d2d] bg-[#2A1515] px-4 py-2.5 text-sm text-[#f2b4b4] transition hover:border-[#b84a4a]"
+          >
+            删除选中
+          </button>
+        </form>
+        <button
+          id="open-export-modal"
+          type="button"
+          class="rounded-xl bg-[#D7FF3E] px-4 py-2.5 text-sm font-medium text-[#0E0E10] transition hover:bg-[#e4ff7a]"
+        >
+          导出选中
+        </button>
+        <button
+          id="exit-selection-mode"
+          type="button"
+          class="rounded-xl border border-[#3A3A42] px-4 py-2.5 text-sm text-white transition hover:border-white/20"
+        >
+          取消
+        </button>
+      </div>
+    </div>
+  </section>
+
+  <section class="grid gap-6 xl:grid-cols-[320px_minmax(0,1fr)]">
+    <aside class="space-y-5">
+      <div class="rounded-[20px] border border-[#2A2A30] bg-[#17171A] p-4">
+        <div class="mb-4 flex items-start justify-between gap-3">
+          <div>
+            <p class="text-[10px] uppercase tracking-[0.18em] text-[#8A8A92]">Project Tree</p>
+            <p class="mt-2 text-sm text-white">全部素材库</p>
+          </div>
+          <a
+            href="/recycle?library_id={{ current_library_id }}"
+            class="rounded-full border border-[#3A3A42] px-3 py-1.5 text-[11px] uppercase tracking-[0.08em] text-white transition hover:border-white/20"
+          >
+            回收站
+          </a>
+        </div>
+        <p class="mb-3 text-[11px] leading-5 text-[#666670]">
+          右键文件夹可新建、重命名或删除，拖动节点可调整层级。
+        </p>
+        <div class="space-y-1.5">
+          <div class="rounded-[12px] border border-[#2A2A30] bg-[#0E0E10]">
+            <div class="flex items-center justify-between gap-2 px-3 py-2">
+              <span class="min-w-0 flex-1 truncate text-sm text-white">全部素材库</span>
+              <span class="text-[11px] text-[#666670]">{{ libraries|length }}</span>
+            </div>
+          </div>
+          {% for library in libraries %}
+          <div
+            data-tree-entry
+            data-tree-entry-id="library-{{ library.id }}"
+            data-tree-parent-entry="root"
+            class="rounded-[12px] border {% if current_library and current_library.id == library.id %}border-[#D7FF3E] bg-[#D7FF3E]/10{% else %}border-transparent{% endif %}"
+            style="margin-left: 16px;"
+            {% if current_library and current_library.id == library.id and project_tree %}
+            data-tree-node
+            data-node-id="{{ project_tree[0].id }}"
+            data-node-name="{{ library.name }}"
+            data-node-parent-id=""
+            data-node-is-root="true"
+            {% endif %}
+          >
+            <div
+              {% if current_library and current_library.id == library.id and project_tree %}
+              data-tree-node-shell
+              draggable="false"
+              {% endif %}
+              class="flex items-center justify-between gap-2 px-3 py-2"
+            >
+              <div class="flex min-w-0 flex-1 items-center gap-2">
+                {% if current_library and current_library.id == library.id and project_tree|length > 1 %}
+                <button
+                  type="button"
+                  data-tree-toggle
+                  data-tree-target="library-{{ library.id }}"
+                  class="rounded-full border border-white/10 p-1 text-[#8A8A92] transition hover:border-white/20 hover:text-white"
+                >
+                  <svg class="tree-toggle-icon h-3.5 w-3.5 transition" viewBox="0 0 20 20" fill="none">
+                    <path d="M7 4L13 10L7 16" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+                  </svg>
+                </button>
+                {% else %}
+                <span class="h-6 w-6"></span>
+                {% endif %}
+                <a
+                  href="/?library_id={{ library.id }}"
+                  class="min-w-0 flex-1 truncate text-sm {% if current_library and current_library.id == library.id %}text-white{% else %}text-[#8A8A92] hover:text-white{% endif %}"
+                >
+                  {{ library.name }}
+                </a>
+              </div>
+              <span class="text-[11px] {% if current_library and current_library.id == library.id %}text-[#D7FF3E]{% else %}text-[#666670]{% endif %}">{{ library.clip_count }}</span>
+            </div>
+          </div>
+          {% if current_library and current_library.id == library.id %}
+          {% for node in project_tree %}
+          {% if not node.is_root %}
+          <div
+            data-tree-entry
+            data-tree-entry-id="node-{{ node.id }}"
+            data-tree-parent-entry="{% if node.parent_id == project_tree[0].id %}library-{{ library.id }}{% else %}node-{{ node.parent_id }}{% endif %}"
+            data-tree-node
+            data-node-id="{{ node.id }}"
+            data-node-name="{{ node.name }}"
+            data-node-parent-id="{{ '' if node.parent_id is none else node.parent_id }}"
+            data-node-is-root="{{ 'true' if node.is_root else 'false' }}"
+            data-node-is-system="{{ 'true' if node.is_system else 'false' }}"
+            class="rounded-[12px] border {% if node.is_active %}border-[#D7FF3E] bg-[#D7FF3E]/10{% else %}border-transparent{% endif %}"
+            style="margin-left: {{ (node.depth + 1) * 16 }}px;"
+          >
+            <div
+              draggable="{{ 'false' if node.is_root or node.is_system else 'true' }}"
+              data-tree-node-shell
+              class="flex items-center justify-between gap-2 px-3 py-2"
+            >
+              <div class="flex min-w-0 flex-1 items-center gap-2">
+                {% if node.has_children %}
+                <button
+                  type="button"
+                  data-tree-toggle
+                  data-tree-target="node-{{ node.id }}"
+                  class="rounded-full border border-white/10 p-1 text-[#8A8A92] transition hover:border-white/20 hover:text-white"
+                >
+                  <svg class="tree-toggle-icon h-3.5 w-3.5 transition" viewBox="0 0 20 20" fill="none">
+                    <path d="M7 4L13 10L7 16" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+                  </svg>
+                </button>
+                {% else %}
+                <span class="h-6 w-6"></span>
+                {% endif %}
+                <a
+                  href="/?library_id={{ current_library_id }}&node_id={{ node.id }}"
+                  draggable="false"
+                  class="min-w-0 flex-1 truncate text-sm {% if node.is_active %}text-white{% else %}text-[#8A8A92] hover:text-white{% endif %}"
+                >
+                  {{ node.name }}
+                </a>
+              </div>
+              <div class="flex items-center gap-2">
+                <span
+                  draggable="false"
+                  class="text-[11px] {% if node.is_active %}text-[#D7FF3E]{% else %}text-[#666670]{% endif %}"
+                >
+                  {{ node.clip_count }}
+                </span>
+                {% if not node.is_system %}
+                <span
+                  draggable="false"
+                  class="rounded-full border border-white/10 px-2 py-1 text-[10px] uppercase tracking-[0.12em] text-[#666670]"
+                  title="拖动排序"
+                >
+                  drag
+                </span>
+                {% endif %}
+              </div>
+            </div>
+          </div>
+          {% endif %}
+          {% endfor %}
+          {% endif %}
+          {% endfor %}
+        </div>
+      </div>
+    </aside>
+
+    <div>
+      <section class="mb-6 rounded-[20px] border border-[#2A2A30] bg-[#17171A] p-4 sm:p-5">
+        <div class="mb-5">
       <p class="mb-3 text-[10px] uppercase tracking-[0.18em] text-[#8A8A92]">素材库分类</p>
       <div class="flex flex-wrap gap-2">
         {% for library in libraries %}
@@ -73,6 +257,7 @@
       class="flex flex-col gap-4"
     >
       <input type="hidden" name="library_id" value="{{ current_library_id }}">
+      <input type="hidden" name="node_id" value="{{ current_node_id }}">
       <div class="grid gap-4 lg:grid-cols-[minmax(0,1fr)_220px_120px]">
         <label class="block">
           <span class="mb-2 block text-[10px] uppercase tracking-[0.18em] text-[#8A8A92]">关键词搜索</span>
@@ -112,7 +297,7 @@
         {% for tag_name, tag_count in all_tags %}
         <button
           type="button"
-          hx-get="/clips?library_id={{ current_library_id }}&q={{ current_query|urlencode }}&tag={{ tag_name|urlencode }}"
+          hx-get="/clips?library_id={{ current_library_id }}&node_id={{ current_node_id }}&q={{ current_query|urlencode }}&tag={{ tag_name|urlencode }}"
           hx-target="#clip-grid"
           class="rounded-full border px-3 py-1 text-[11px] transition {% if current_tag == tag_name %}border-[#D7FF3E] bg-[#D7FF3E] text-[#0E0E10]{% else %}border-[#2A2A30] bg-[#0E0E10] text-[#8A8A92] hover:border-white/20 hover:text-white{% endif %}"
         >
@@ -121,14 +306,16 @@
         {% endfor %}
       </div>
     </form>
-  </section>
+      </section>
 
-  <div id="selection-hint" class="mb-6 hidden rounded-[16px] border border-[#5a4510] bg-[#2b230d] px-4 py-3 text-sm text-[#f0d88b]">
-    请先选中至少一条素材，再打开打包页。
-  </div>
+      <div id="selection-hint" class="mb-6 hidden rounded-[16px] border border-[#5a4510] bg-[#2b230d] px-4 py-3 text-sm text-[#f0d88b]">
+        请先选中至少一条素材，再继续当前操作。
+      </div>
 
-  <section id="clip-grid">
-    {% include "partials/clip_grid.html" %}
+      <section id="clip-grid">
+        {% include "partials/clip_grid.html" %}
+      </section>
+    </div>
   </section>
 </main>
 
@@ -137,6 +324,55 @@
 </form>
 
 <form id="delete-library-form" action="" method="post" class="hidden"></form>
+<form id="compare-selection-form" action="/compare/selection" method="post" class="hidden">
+  <input type="hidden" name="library_id" value="{{ current_library_id }}">
+</form>
+<form id="single-clip-delete-form" action="/clips/delete" method="post" class="hidden">
+  <input type="hidden" name="library_id" value="{{ current_library_id }}">
+  <input type="hidden" name="node_id" value="{{ current_node_id }}">
+  <input type="hidden" name="selected_ids" id="single-clip-delete-id">
+</form>
+<form id="move-node-drag-form" action="" method="post" class="hidden">
+  <input type="hidden" name="library_id" value="{{ current_library_id }}">
+  <input type="hidden" name="target_parent_id" id="move-node-target-parent">
+</form>
+<form id="tree-node-delete-form" action="" method="post" class="hidden">
+  <input type="hidden" name="library_id" value="{{ current_library_id }}">
+</form>
+
+<div id="clip-delete-modal" class="fixed inset-0 z-[70] hidden">
+  <div class="absolute inset-0 bg-black/70 backdrop-blur-sm"></div>
+  <div class="relative flex min-h-screen items-center justify-center px-4 py-8">
+    <div class="w-full max-w-[420px] overflow-hidden rounded-[24px] border border-[#3A2426] bg-[#110F11] shadow-[0_40px_120px_rgba(0,0,0,0.55)]">
+      <div class="border-b border-[#23181A] px-5 pb-4 pt-5">
+        <p class="text-lg font-medium tracking-tight text-white">删除已选素材？</p>
+        <p class="mt-2 text-sm leading-6 text-[#9E8B8B]">确认后会从当前素材库移除这些素材，操作不会自动撤销。</p>
+      </div>
+      <div class="px-5 py-4">
+        <div class="rounded-[16px] border border-[#2B2325] bg-[#171214] px-4 py-3">
+          <p class="text-[10px] uppercase tracking-[0.16em] text-[#8A8A92]">Selected Clips</p>
+          <p class="mt-2 text-sm text-white"><span id="delete-selected-count">0</span> 条素材</p>
+        </div>
+      </div>
+      <div class="flex items-center justify-end gap-2 border-t border-[#23181A] px-5 py-4">
+        <button
+          type="button"
+          id="cancel-clip-delete"
+          class="rounded-full border border-[#303038] px-4 py-2 text-[11px] uppercase tracking-[0.08em] text-[#8A8A92] transition hover:border-white/20 hover:text-white"
+        >
+          Cancel
+        </button>
+        <button
+          type="button"
+          id="confirm-clip-delete"
+          class="rounded-full border border-[#6A3530] bg-[#2B1718] px-4 py-2 text-[11px] uppercase tracking-[0.1em] text-[#FFB4A9] transition hover:border-[#FF6B57] hover:text-white"
+        >
+          Drop To Trash
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
 
 <div id="library-context-menu" class="fixed z-50 hidden min-w-[180px] overflow-hidden rounded-[14px] border border-[#2A2A30] bg-[#17171A] p-1 shadow-[0_20px_50px_rgba(0,0,0,0.45)]">
   <button
@@ -155,6 +391,135 @@
   </button>
 </div>
 
+<div id="clip-context-menu" class="fixed z-[60] hidden min-w-[180px] overflow-hidden rounded-[14px] border border-[#2A2A30] bg-[#17171A] p-1 shadow-[0_20px_50px_rgba(0,0,0,0.45)]">
+  <button
+    type="button"
+    id="clip-move-action"
+    class="flex w-full items-center rounded-[10px] px-3 py-2 text-left text-sm text-white transition hover:bg-white/5"
+  >
+    移动到文件夹
+  </button>
+  <button
+    type="button"
+    id="clip-delete-action"
+    class="flex w-full items-center rounded-[10px] px-3 py-2 text-left text-sm text-[#f2b4b4] transition hover:bg-[#2A1515]"
+  >
+    删除素材
+  </button>
+</div>
+
+<div id="tree-context-menu" class="fixed z-[60] hidden min-w-[180px] overflow-hidden rounded-[14px] border border-[#2A2A30] bg-[#17171A] p-1 shadow-[0_20px_50px_rgba(0,0,0,0.45)]">
+  <button
+    type="button"
+    id="tree-create-action"
+    class="flex w-full items-center rounded-[10px] px-3 py-2 text-left text-sm text-white transition hover:bg-white/5"
+  >
+    新建子文件夹
+  </button>
+  <button
+    type="button"
+    id="tree-rename-action"
+    class="flex w-full items-center rounded-[10px] px-3 py-2 text-left text-sm text-white transition hover:bg-white/5"
+  >
+    重命名
+  </button>
+  <button
+    type="button"
+    id="tree-delete-action"
+    class="flex w-full items-center rounded-[10px] px-3 py-2 text-left text-sm text-[#f2b4b4] transition hover:bg-[#2A1515]"
+  >
+    删除
+  </button>
+</div>
+
+<div id="tree-node-modal" class="fixed inset-0 z-[80] hidden">
+  <div class="absolute inset-0 bg-black/70 backdrop-blur-sm"></div>
+  <div class="relative flex min-h-screen items-center justify-center px-4 py-8">
+    <div class="w-full max-w-[420px] overflow-hidden rounded-[24px] border border-[#2A2A30] bg-[#110F11] shadow-[0_40px_120px_rgba(0,0,0,0.55)]">
+      <div class="border-b border-[#23181A] px-5 pb-4 pt-5">
+        <p id="tree-node-modal-title" class="text-lg font-medium tracking-tight text-white">新建子文件夹</p>
+        <p id="tree-node-modal-copy" class="mt-2 text-sm leading-6 text-[#9E8B8B]">给当前节点取一个清楚的分类名称。</p>
+      </div>
+      <form id="tree-node-modal-form" action="/projects/nodes" method="post" class="px-5 py-5">
+        <input type="hidden" name="library_id" value="{{ current_library_id }}">
+        <input type="hidden" name="parent_id" id="tree-node-modal-parent-id">
+        <input type="hidden" name="new_name" id="tree-node-modal-rename-name">
+        <label id="tree-node-modal-field" class="block">
+          <span id="tree-node-modal-label" class="mb-2 block text-[10px] uppercase tracking-[0.18em] text-[#8A8A92]">Folder Name</span>
+          <input
+            id="tree-node-modal-input"
+            type="text"
+            name="name"
+            class="w-full rounded-[14px] border border-[#2A2A30] bg-[#0E0E10] px-4 py-3 text-sm text-white outline-none placeholder:text-[#5A5A62] focus:border-[#D7FF3E]"
+          >
+        </label>
+        <p id="tree-node-modal-note" class="mt-3 text-xs leading-5 text-[#666670]">例如：美食、景点、海边。</p>
+        <div class="mt-5 flex items-center justify-end gap-2 border-t border-[#23181A] pt-4">
+          <button
+            type="button"
+            id="tree-node-modal-cancel"
+            class="rounded-full border border-[#303038] px-4 py-2 text-[11px] uppercase tracking-[0.08em] text-[#8A8A92] transition hover:border-white/20 hover:text-white"
+          >
+            Cancel
+          </button>
+          <button
+            type="submit"
+            id="tree-node-modal-submit"
+            class="rounded-full border border-[#D7FF3E] bg-[#D7FF3E] px-4 py-2 text-[11px] uppercase tracking-[0.08em] text-[#0E0E10] transition hover:bg-[#e4ff7a]"
+          >
+            保存
+          </button>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
+
+<div id="clip-move-modal" class="fixed inset-0 z-[80] hidden">
+  <div class="absolute inset-0 bg-black/70 backdrop-blur-sm"></div>
+  <div class="relative flex min-h-screen items-center justify-center px-4 py-8">
+    <div class="w-full max-w-[420px] overflow-hidden rounded-[24px] border border-[#2A2A30] bg-[#110F11] shadow-[0_40px_120px_rgba(0,0,0,0.55)]">
+      <div class="border-b border-[#23181A] px-5 pb-4 pt-5">
+        <p class="text-lg font-medium tracking-tight text-white">移动素材</p>
+        <p class="mt-2 text-sm leading-6 text-[#9E8B8B]">把这条素材移动到新的文件夹，或者放回未分类。</p>
+      </div>
+      <form id="clip-move-form" method="post" class="px-5 py-5">
+        <input type="hidden" name="library_id" value="{{ current_library_id }}">
+        <input type="hidden" name="return_node_id" value="{{ current_node_id }}">
+        <label class="block">
+          <span class="mb-2 block text-[10px] uppercase tracking-[0.18em] text-[#8A8A92]">Target Folder</span>
+          <select
+            name="target_node_id"
+            id="clip-move-target"
+            class="w-full rounded-[14px] border border-[#2A2A30] bg-[#0E0E10] px-4 py-3 text-sm text-white outline-none focus:border-[#D7FF3E]"
+          >
+            {% for node in project_tree %}
+            {% if not node.is_root %}
+            <option value="{{ node.id }}">{{ "　" * (node.depth - 1) }}{{ node.name }}</option>
+            {% endif %}
+            {% endfor %}
+          </select>
+        </label>
+        <div class="mt-5 flex items-center justify-end gap-2 border-t border-[#23181A] pt-4">
+          <button
+            type="button"
+            id="clip-move-cancel"
+            class="rounded-full border border-[#303038] px-4 py-2 text-[11px] uppercase tracking-[0.08em] text-[#8A8A92] transition hover:border-white/20 hover:text-white"
+          >
+            Cancel
+          </button>
+          <button
+            type="submit"
+            class="rounded-full border border-[#D7FF3E] bg-[#D7FF3E] px-4 py-2 text-[11px] uppercase tracking-[0.08em] text-[#0E0E10] transition hover:bg-[#e4ff7a]"
+          >
+            移动
+          </button>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
+
 <div id="export-modal" class="fixed inset-0 z-50 hidden">
   <div class="absolute inset-0 bg-black/70 backdrop-blur-sm"></div>
   <div class="relative flex min-h-screen items-center justify-center px-4 py-8">
@@ -163,7 +528,7 @@
         <div class="border-b border-[#17171A] px-5 pb-4 pt-5">
           <div class="flex items-start justify-between gap-4">
             <div>
-              <p class="text-lg font-medium tracking-tight text-white">打包已选素材</p>
+              <p class="text-lg font-medium tracking-tight text-white">导出已选素材</p>
               <p class="mt-1 text-xs text-[#8A8A92]">准备把你挑中的素材复制到导出目录。</p>
             </div>
             <button type="button" data-close-export class="rounded-full p-1 text-[#8A8A92] transition hover:bg-white/5 hover:text-white">
@@ -174,20 +539,15 @@
           </div>
         </div>
 
-        <form
-          id="export-form"
-          hx-post="/export/clips"
-          hx-target="#export-state-ready"
-          hx-swap="innerHTML"
-          class="px-5 py-4"
-        >
+        <form id="export-form" action="/export/clips" method="post" class="px-5 py-4">
           <input type="hidden" name="library_id" value="{{ current_library_id }}">
+          <input type="hidden" name="node_id" value="{{ current_node_id }}">
           <input type="hidden" name="q" value="{{ current_query }}">
           <input type="hidden" name="tag" value="{{ current_tag }}">
 
           <div class="space-y-4">
             <div>
-              <p class="mb-2 text-[10px] uppercase tracking-[0.18em] text-[#8A8A92]">打包概览</p>
+              <p class="mb-2 text-[10px] uppercase tracking-[0.18em] text-[#8A8A92]">导出概览</p>
               <div class="rounded-[14px] bg-[#17171A] p-4">
                 <div class="flex items-end justify-between gap-4">
                   <div>
@@ -224,7 +584,7 @@
                 type="submit"
                 class="rounded-xl bg-[#D7FF3E] px-4 py-2 text-sm font-medium text-[#0E0E10] transition hover:bg-[#e4ff7a]"
               >
-                开始打包
+                开始导出
               </button>
             </div>
           </div>
@@ -233,9 +593,9 @@
 
       <section id="export-state-packing" class="hidden px-5 py-5">
         <div class="flex items-start justify-between gap-4 border-b border-[#17171A] pb-4">
-          <div>
-            <p class="text-lg font-medium tracking-tight text-white">正在打包素材</p>
-            <p class="mt-1 text-xs text-[#8A8A92]">服务器正在复制文件，请稍等一会。</p>
+            <div>
+              <p class="text-lg font-medium tracking-tight text-white">正在导出素材</p>
+              <p class="mt-1 text-xs text-[#8A8A92]">服务器正在复制文件，请稍等一会。</p>
           </div>
         </div>
 
@@ -263,22 +623,66 @@
   (() => {
     const body = document.body;
     const modal = document.getElementById("export-modal");
-    const openButton = document.getElementById("open-export-modal");
-    const editModeButton = document.getElementById("toggle-edit-mode");
+    const openSelectionModeButton = document.getElementById("open-selection-mode");
+    const openExportModalButton = document.getElementById("open-export-modal");
+    const selectionToolbar = document.getElementById("selection-toolbar");
+    const selectionModeLabel = document.getElementById("selection-mode-label");
+    const selectAllButton = document.getElementById("select-all-button");
+    const clearSelectionButton = document.getElementById("clear-selection-button");
+    const compareSelectionButton = document.getElementById("compare-selection-button");
+    const compareSelectionForm = document.getElementById("compare-selection-form");
+    const exitSelectionModeButton = document.getElementById("exit-selection-mode");
     const bulkDeleteForm = document.getElementById("bulk-delete-form");
     const bulkDeleteButton = document.getElementById("bulk-delete-button");
-    const contextMenu = document.getElementById("library-context-menu");
+    const clipDeleteModal = document.getElementById("clip-delete-modal");
+    const deleteSelectedCount = document.getElementById("delete-selected-count");
+    const cancelClipDelete = document.getElementById("cancel-clip-delete");
+    const confirmClipDelete = document.getElementById("confirm-clip-delete");
+    const libraryContextMenu = document.getElementById("library-context-menu");
     const renameForm = document.getElementById("rename-library-form");
     const renameInput = document.getElementById("rename-library-input");
     const deleteForm = document.getElementById("delete-library-form");
     const renameAction = document.getElementById("rename-library-action");
     const deleteAction = document.getElementById("delete-library-action");
+    const clipContextMenu = document.getElementById("clip-context-menu");
+    const clipMoveAction = document.getElementById("clip-move-action");
+    const clipDeleteAction = document.getElementById("clip-delete-action");
+    const singleClipDeleteForm = document.getElementById("single-clip-delete-form");
+    const singleClipDeleteId = document.getElementById("single-clip-delete-id");
     const hint = document.getElementById("selection-hint");
+    const moveNodeDragForm = document.getElementById("move-node-drag-form");
+    const moveNodeTargetParent = document.getElementById("move-node-target-parent");
+    const exportForm = document.getElementById("export-form");
+    const treeDeleteForm = document.getElementById("tree-node-delete-form");
+    const treeContextMenu = document.getElementById("tree-context-menu");
+    const treeCreateAction = document.getElementById("tree-create-action");
+    const treeRenameAction = document.getElementById("tree-rename-action");
+    const treeDeleteAction = document.getElementById("tree-delete-action");
+    const treeNodeModal = document.getElementById("tree-node-modal");
+    const treeNodeModalForm = document.getElementById("tree-node-modal-form");
+    const treeNodeModalTitle = document.getElementById("tree-node-modal-title");
+    const treeNodeModalCopy = document.getElementById("tree-node-modal-copy");
+    const treeNodeModalField = document.getElementById("tree-node-modal-field");
+    const treeNodeModalParentId = document.getElementById("tree-node-modal-parent-id");
+    const treeNodeModalRenameName = document.getElementById("tree-node-modal-rename-name");
+    const treeNodeModalLabel = document.getElementById("tree-node-modal-label");
+    const treeNodeModalInput = document.getElementById("tree-node-modal-input");
+    const treeNodeModalNote = document.getElementById("tree-node-modal-note");
+    const treeNodeModalSubmit = document.getElementById("tree-node-modal-submit");
+    const treeNodeModalCancel = document.getElementById("tree-node-modal-cancel");
+    const clipMoveModal = document.getElementById("clip-move-modal");
+    const clipMoveForm = document.getElementById("clip-move-form");
+    const clipMoveCancel = document.getElementById("clip-move-cancel");
     const configureState = document.getElementById("export-state-configure");
     const packingState = document.getElementById("export-state-packing");
     const readyState = document.getElementById("export-state-ready");
-    let isEditMode = false;
+    let selectionMode = "browse";
     let activeLibraryMeta = null;
+    let activeTreeNodeMeta = null;
+    let activeTreeModalMode = null;
+    let activeClipMeta = null;
+    let draggedNodeId = null;
+    let exportAbortController = null;
     const selectedCountNodes = [
       document.getElementById("selected-count"),
       document.getElementById("modal-selected-count"),
@@ -295,23 +699,47 @@
     function syncCardState(input) {
       const card = input.closest("[data-clip-card]");
       if (!card) return;
+      const control = card.querySelector("[data-selection-control]");
+      const dot = card.querySelector(".selection-dot");
 
       if (input.checked) {
         card.classList.add("is-selected");
+        card.classList.add("border-[#D7FF3E]");
+        if (control) {
+          control.classList.add("border-[#D7FF3E]", "bg-[#D7FF3E]", "text-[#0E0E10]");
+          control.classList.remove("border-white/30", "bg-black/55", "text-transparent");
+        }
+        if (dot) {
+          dot.classList.add("border-[#0E0E10]", "bg-[#0E0E10]");
+          dot.classList.remove("border-white/50", "bg-transparent");
+        }
       } else {
         card.classList.remove("is-selected");
+        card.classList.remove("border-[#D7FF3E]");
+        if (control) {
+          control.classList.remove("border-[#D7FF3E]", "bg-[#D7FF3E]", "text-[#0E0E10]");
+          control.classList.add("border-white/30", "bg-black/55", "text-transparent");
+        }
+        if (dot) {
+          dot.classList.remove("border-[#0E0E10]", "bg-[#0E0E10]");
+          dot.classList.add("border-white/50", "bg-transparent");
+        }
       }
     }
 
     function syncSelectionControlsVisibility() {
       document.querySelectorAll("[data-selection-control]").forEach((node) => {
-        node.classList.toggle("hidden", !isEditMode);
+        node.classList.toggle("hidden", selectionMode === "browse");
+        node.classList.toggle("flex", selectionMode !== "browse");
+      });
+      document.querySelectorAll("[data-card-edit-open]").forEach((node) => {
+        node.classList.toggle("hidden", selectionMode !== "browse");
       });
     }
 
     function fillSelectedIds(form) {
       if (!form) return;
-      form.querySelectorAll('input[name="selected_ids"]').forEach((node) => node.remove());
+      form.querySelectorAll('input[data-generated-selected-id="true"]').forEach((node) => node.remove());
       getCheckboxes()
         .filter((input) => input.checked)
         .forEach((input) => {
@@ -319,6 +747,7 @@
           hidden.type = "hidden";
           hidden.name = "selected_ids";
           hidden.value = input.value;
+          hidden.setAttribute("data-generated-selected-id", "true");
           form.appendChild(hidden);
         });
     }
@@ -339,28 +768,124 @@
       }
     }
 
-    function applyEditMode() {
-      document.body.classList.toggle("library-edit-mode", isEditMode);
-      if (editModeButton) {
-        editModeButton.textContent = isEditMode ? "完成编辑" : "编辑";
+    function resetCardEditors() {
+      document.querySelectorAll("[data-clip-card]").forEach((card) => {
+        const display = card.querySelector("[data-card-summary-display]");
+        const form = card.querySelector("[data-card-edit-form]");
+        if (display) display.classList.remove("hidden");
+        if (form) form.classList.add("hidden");
+      });
+    }
+
+    function setSelectionMode(nextMode) {
+      selectionMode = nextMode;
+      body.dataset.libraryMode = selectionMode;
+      const primaryActions = document.getElementById("primary-actions");
+      if (primaryActions) {
+        primaryActions.classList.toggle("hidden", selectionMode !== "browse");
+      }
+      if (selectionToolbar) {
+        selectionToolbar.classList.toggle("hidden", selectionMode === "browse");
+      }
+      if (selectionModeLabel) {
+        selectionModeLabel.textContent = "Select Mode";
+      }
+      if (openSelectionModeButton) {
+        openSelectionModeButton.textContent = selectionMode === "select" ? "完成选择" : "选择";
+        openSelectionModeButton.classList.toggle("ring-2", selectionMode === "select");
+        openSelectionModeButton.classList.toggle("ring-[#D7FF3E]/40", selectionMode === "select");
+      }
+      if (openExportModalButton) {
+        openExportModalButton.classList.toggle("hidden", selectionMode !== "select");
       }
       if (bulkDeleteForm) {
-        bulkDeleteForm.classList.toggle("hidden", !isEditMode);
-        bulkDeleteForm.classList.toggle("inline-flex", isEditMode);
+        bulkDeleteForm.classList.toggle("hidden", selectionMode !== "select");
+        bulkDeleteForm.classList.toggle("inline-flex", selectionMode === "select");
       }
-      if (!isEditMode) {
+      if (compareSelectionButton) {
+        compareSelectionButton.classList.toggle("hidden", selectionMode !== "select");
+      }
+      if (selectionMode === "browse") {
         getCheckboxes().forEach((input) => {
           input.checked = false;
           syncCardState(input);
         });
+        resetCardEditors();
       }
       syncSelectionControlsVisibility();
       syncSelectionUI();
     }
 
-    function closeContextMenu() {
-      contextMenu.classList.add("hidden");
+    function closeLibraryContextMenu() {
+      libraryContextMenu.classList.add("hidden");
       activeLibraryMeta = null;
+    }
+
+    function closeTreeContextMenu(resetActive = true) {
+      treeContextMenu.classList.add("hidden");
+      if (resetActive) {
+        activeTreeNodeMeta = null;
+      }
+    }
+
+    function closeTreeNodeModal() {
+      if (!treeNodeModal) return;
+      treeNodeModal.classList.add("hidden");
+      activeTreeModalMode = null;
+      activeTreeNodeMeta = null;
+      if (modal.classList.contains("hidden") && clipDeleteModal.classList.contains("hidden")) {
+        body.classList.remove("overflow-hidden");
+      }
+    }
+
+    function openTreeNodeModal(mode) {
+      if (!treeNodeModal || !treeNodeModalInput || !activeTreeNodeMeta) return;
+      activeTreeModalMode = mode;
+      if (mode === "create") {
+        treeNodeModalForm.action = "/projects/nodes";
+        treeNodeModalInput.name = "name";
+        treeNodeModalParentId.value = activeTreeNodeMeta.id;
+        treeNodeModalRenameName.value = "";
+        treeNodeModalField.classList.remove("hidden");
+        treeNodeModalTitle.textContent = "新建子文件夹";
+        treeNodeModalCopy.textContent = `会创建在「${activeTreeNodeMeta.name}」下面。`;
+        treeNodeModalLabel.textContent = "Folder Name";
+        treeNodeModalInput.value = "";
+        treeNodeModalInput.placeholder = "例如：美食 / 景点 / 海边";
+        treeNodeModalNote.textContent = "给这一层取一个更细一点的分类名称。";
+        treeNodeModalSubmit.textContent = "创建";
+      } else if (mode === "rename") {
+        treeNodeModalForm.action = `/projects/nodes/${activeTreeNodeMeta.id}/rename`;
+        treeNodeModalInput.name = "unused_name";
+        treeNodeModalParentId.value = "";
+        treeNodeModalRenameName.value = activeTreeNodeMeta.name;
+        treeNodeModalField.classList.remove("hidden");
+        treeNodeModalTitle.textContent = "重命名文件夹";
+        treeNodeModalCopy.textContent = "换一个更清楚的名称，方便后续分类。";
+        treeNodeModalLabel.textContent = "New Name";
+        treeNodeModalInput.value = activeTreeNodeMeta.name;
+        treeNodeModalInput.placeholder = "输入新的文件夹名称";
+        treeNodeModalNote.textContent = "同一层级下尽量保持命名清晰。";
+        treeNodeModalSubmit.textContent = "保存";
+      } else if (mode === "delete") {
+        treeNodeModalForm.action = "";
+        treeNodeModalInput.name = "unused_name";
+        treeNodeModalParentId.value = "";
+        treeNodeModalRenameName.value = "";
+        treeNodeModalField.classList.add("hidden");
+        treeNodeModalTitle.textContent = "删除文件夹";
+        treeNodeModalCopy.textContent = `会删除「${activeTreeNodeMeta.name}」，只有空文件夹才能删除。`;
+        treeNodeModalNote.textContent = "如果里面还有子文件夹或素材引用，系统会阻止这次删除。";
+        treeNodeModalSubmit.textContent = "删除";
+      }
+      treeNodeModal.classList.remove("hidden");
+      body.classList.add("overflow-hidden");
+      if (mode !== "delete") {
+        window.setTimeout(() => {
+          treeNodeModalInput.focus();
+          treeNodeModalInput.select();
+        }, 0);
+      }
     }
 
     function resetExportStates() {
@@ -377,8 +902,30 @@
     }
 
     function closeModal() {
+      if (exportAbortController) {
+        exportAbortController.abort();
+        exportAbortController = null;
+      }
       modal.classList.add("hidden");
       body.classList.remove("overflow-hidden");
+      resetExportStates();
+    }
+
+    function openClipDeleteModal() {
+      if (!clipDeleteModal) return;
+      if (deleteSelectedCount) {
+        deleteSelectedCount.textContent = String(getSelectedCount());
+      }
+      clipDeleteModal.classList.remove("hidden");
+      body.classList.add("overflow-hidden");
+    }
+
+    function closeClipDeleteModal() {
+      if (!clipDeleteModal) return;
+      clipDeleteModal.classList.add("hidden");
+      if (modal.classList.contains("hidden")) {
+        body.classList.remove("overflow-hidden");
+      }
     }
 
     function bindSelectionEvents() {
@@ -402,14 +949,133 @@
             name: pill.dataset.libraryName,
             count: Number(pill.dataset.libraryCount || "0"),
           };
-          contextMenu.style.left = `${event.clientX}px`;
-          contextMenu.style.top = `${event.clientY}px`;
-          contextMenu.classList.remove("hidden");
+          libraryContextMenu.style.left = `${event.clientX}px`;
+          libraryContextMenu.style.top = `${event.clientY}px`;
+          libraryContextMenu.classList.remove("hidden");
         });
       });
     }
 
-    openButton.addEventListener("click", () => {
+    function bindTreeContextMenu() {
+      document.querySelectorAll("[data-tree-node]").forEach((node) => {
+        if (node.dataset.contextBound === "true") return;
+        node.dataset.contextBound = "true";
+        node.addEventListener("contextmenu", (event) => {
+          event.preventDefault();
+          const isRoot = node.dataset.nodeIsRoot === "true";
+          activeTreeNodeMeta = {
+            id: node.dataset.nodeId,
+            name: node.dataset.nodeName,
+            parentId: node.dataset.nodeParentId || "",
+            isRoot,
+            isSystem: node.dataset.nodeIsSystem === "true",
+          };
+          treeRenameAction.classList.toggle("hidden", isRoot || activeTreeNodeMeta.isSystem);
+          treeDeleteAction.classList.toggle("hidden", isRoot || activeTreeNodeMeta.isSystem);
+          treeContextMenu.style.left = `${event.clientX}px`;
+          treeContextMenu.style.top = `${event.clientY}px`;
+          treeContextMenu.classList.remove("hidden");
+        });
+      });
+    }
+
+    function bindClipContextMenu() {
+      document.querySelectorAll("[data-clip-card]").forEach((card) => {
+        if (card.dataset.contextBound === "true") return;
+        card.dataset.contextBound = "true";
+        card.addEventListener("contextmenu", (event) => {
+          event.preventDefault();
+          activeClipMeta = {
+            id: card.dataset.clipId,
+            summary: card.dataset.clipSummary || "",
+          };
+          clipContextMenu.style.left = `${event.clientX}px`;
+          clipContextMenu.style.top = `${event.clientY}px`;
+          clipContextMenu.classList.remove("hidden");
+        });
+      });
+    }
+
+    function bindTreeDragDrop() {
+      document.querySelectorAll("[data-tree-node-shell]").forEach((shell) => {
+        if (shell.dataset.dragBound === "true") return;
+        shell.dataset.dragBound = "true";
+        const node = shell.closest("[data-tree-node]");
+        if (!node) return;
+        shell.addEventListener("dragstart", (event) => {
+          if (node.dataset.nodeIsSystem === "true") return;
+          draggedNodeId = node.dataset.nodeId || null;
+          node.classList.add("opacity-60");
+          if (event.dataTransfer) {
+            event.dataTransfer.effectAllowed = "move";
+            event.dataTransfer.setData("text/plain", draggedNodeId || "");
+          }
+        });
+        shell.addEventListener("dragend", () => {
+          draggedNodeId = null;
+          node.classList.remove("opacity-60");
+        });
+        node.addEventListener("dragover", (event) => {
+          if (!draggedNodeId || draggedNodeId === node.dataset.nodeId || node.dataset.nodeIsSystem === "true") return;
+          event.preventDefault();
+          node.classList.add("ring-1", "ring-[#D7FF3E]");
+        });
+        node.addEventListener("dragleave", () => {
+          node.classList.remove("ring-1", "ring-[#D7FF3E]");
+        });
+        node.addEventListener("drop", (event) => {
+          if (node.dataset.nodeIsSystem === "true") return;
+          event.preventDefault();
+          node.classList.remove("ring-1", "ring-[#D7FF3E]");
+          const targetNodeId = node.dataset.nodeId;
+          if (!draggedNodeId || !targetNodeId || draggedNodeId === targetNodeId || !moveNodeDragForm || !moveNodeTargetParent) {
+            return;
+          }
+          moveNodeDragForm.action = `/projects/nodes/${draggedNodeId}/move`;
+          moveNodeTargetParent.value = targetNodeId;
+          HTMLFormElement.prototype.submit.call(moveNodeDragForm);
+        });
+      });
+    }
+
+    function applyTreeCollapsedState() {
+      const collapsed = JSON.parse(window.localStorage.getItem("reelsift-tree-collapsed") || "{}");
+      document.querySelectorAll("[data-tree-entry]").forEach((entry) => {
+        const parentKey = entry.dataset.treeParentEntry;
+        if (parentKey && parentKey !== "root") {
+          const parentCollapsed = collapsed[parentKey] === true;
+          entry.classList.toggle("hidden", parentCollapsed);
+        }
+      });
+      document.querySelectorAll("[data-tree-toggle]").forEach((button) => {
+        const targetKey = button.dataset.treeTarget;
+        const icon = button.querySelector(".tree-toggle-icon");
+        if (icon) {
+          icon.classList.toggle("rotate-90", collapsed[targetKey] !== true);
+        }
+      });
+    }
+
+    function bindTreeToggles() {
+      document.querySelectorAll("[data-tree-toggle]").forEach((button) => {
+        if (button.dataset.toggleBound === "true") return;
+        button.dataset.toggleBound = "true";
+        button.addEventListener("click", () => {
+          const targetKey = button.dataset.treeTarget;
+          const collapsed = JSON.parse(window.localStorage.getItem("reelsift-tree-collapsed") || "{}");
+          collapsed[targetKey] = !collapsed[targetKey];
+          window.localStorage.setItem("reelsift-tree-collapsed", JSON.stringify(collapsed));
+          applyTreeCollapsedState();
+        });
+      });
+      applyTreeCollapsedState();
+    }
+
+    openSelectionModeButton?.addEventListener("click", () => {
+      setSelectionMode(selectionMode === "select" ? "browse" : "select");
+    });
+
+    openExportModalButton?.addEventListener("click", () => {
       if (getSelectedCount() === 0) {
         hint.classList.remove("hidden");
         return;
@@ -417,12 +1083,34 @@
       openModal();
     });
 
-    if (editModeButton) {
-      editModeButton.addEventListener("click", () => {
-        isEditMode = !isEditMode;
-        applyEditMode();
+    selectAllButton?.addEventListener("click", () => {
+      getCheckboxes().forEach((input) => {
+        input.checked = true;
+        syncCardState(input);
       });
-    }
+      syncSelectionUI();
+    });
+
+    clearSelectionButton?.addEventListener("click", () => {
+      getCheckboxes().forEach((input) => {
+        input.checked = false;
+        syncCardState(input);
+      });
+      syncSelectionUI();
+    });
+
+    exitSelectionModeButton?.addEventListener("click", () => {
+      setSelectionMode("browse");
+    });
+
+    compareSelectionButton?.addEventListener("click", () => {
+      if (getSelectedCount() < 2) {
+        hint.classList.remove("hidden");
+        return;
+      }
+      fillSelectedIds(compareSelectionForm);
+      HTMLFormElement.prototype.submit.call(compareSelectionForm);
+    });
 
     if (bulkDeleteForm) {
       bulkDeleteForm.addEventListener("submit", (event) => {
@@ -432,17 +1120,23 @@
           return;
         }
         fillSelectedIds(bulkDeleteForm);
-        if (!window.confirm(`确定删除已选中的 ${getSelectedCount()} 条素材吗？`)) {
-          event.preventDefault();
-        }
+        event.preventDefault();
+        openClipDeleteModal();
       });
     }
+
+    cancelClipDelete?.addEventListener("click", closeClipDeleteModal);
+    confirmClipDelete?.addEventListener("click", () => {
+      fillSelectedIds(bulkDeleteForm);
+      closeClipDeleteModal();
+      HTMLFormElement.prototype.submit.call(bulkDeleteForm);
+    });
 
     renameAction.addEventListener("click", () => {
       if (!activeLibraryMeta) return;
       if (activeLibraryMeta.id === "1") {
         window.alert("默认素材库不支持重命名。");
-        closeContextMenu();
+        closeLibraryContextMenu();
         return;
       }
       const newName = window.prompt("输入新的素材库名称", activeLibraryMeta.name);
@@ -451,26 +1145,157 @@
         renameInput.value = newName.trim();
         renameForm.submit();
       }
-      closeContextMenu();
+      closeLibraryContextMenu();
     });
 
     deleteAction.addEventListener("click", () => {
       if (!activeLibraryMeta) return;
       if (activeLibraryMeta.id === "1") {
         window.alert("默认素材库不支持删除。");
-        closeContextMenu();
+        closeLibraryContextMenu();
         return;
       }
       if (activeLibraryMeta.count > 0) {
         window.alert("素材库里还有素材，清空后才能删除。");
-        closeContextMenu();
+        closeLibraryContextMenu();
         return;
       }
       if (window.confirm(`确定删除素材库「${activeLibraryMeta.name}」吗？`)) {
         deleteForm.action = `/libraries/${activeLibraryMeta.id}/delete`;
         deleteForm.submit();
       }
-      closeContextMenu();
+      closeLibraryContextMenu();
+    });
+
+    treeCreateAction?.addEventListener("click", () => {
+      const nodeMeta = activeTreeNodeMeta;
+      closeTreeContextMenu(false);
+      activeTreeNodeMeta = nodeMeta;
+      openTreeNodeModal("create");
+    });
+
+    treeRenameAction?.addEventListener("click", () => {
+      if (!activeTreeNodeMeta || activeTreeNodeMeta.isRoot) return;
+      const nodeMeta = activeTreeNodeMeta;
+      closeTreeContextMenu(false);
+      activeTreeNodeMeta = nodeMeta;
+      openTreeNodeModal("rename");
+    });
+
+    treeDeleteAction?.addEventListener("click", () => {
+      if (!activeTreeNodeMeta || activeTreeNodeMeta.isRoot || activeTreeNodeMeta.isSystem || !treeDeleteForm) return;
+      const nodeMeta = activeTreeNodeMeta;
+      closeTreeContextMenu(false);
+      activeTreeNodeMeta = nodeMeta;
+      openTreeNodeModal("delete");
+    });
+
+    clipMoveAction?.addEventListener("click", () => {
+      if (!activeClipMeta || !clipMoveForm) return;
+      clipMoveForm.action = `/clips/${activeClipMeta.id}/move`;
+      clipContextMenu.classList.add("hidden");
+      clipMoveModal.classList.remove("hidden");
+      body.classList.add("overflow-hidden");
+    });
+
+    clipDeleteAction?.addEventListener("click", () => {
+      if (!activeClipMeta || !singleClipDeleteForm || !singleClipDeleteId) return;
+      clipContextMenu.classList.add("hidden");
+      singleClipDeleteId.value = activeClipMeta.id;
+      HTMLFormElement.prototype.submit.call(singleClipDeleteForm);
+    });
+
+    clipMoveCancel?.addEventListener("click", () => {
+      clipMoveModal.classList.add("hidden");
+      if (modal.classList.contains("hidden") && clipDeleteModal.classList.contains("hidden")) {
+        body.classList.remove("overflow-hidden");
+      }
+    });
+
+    treeNodeModalCancel?.addEventListener("click", closeTreeNodeModal);
+    treeNodeModalForm?.addEventListener("submit", (event) => {
+      event.preventDefault();
+      if (!activeTreeNodeMeta || !treeNodeModalInput) return;
+      const value = treeNodeModalInput.value.trim();
+      if (activeTreeModalMode === "create" && treeNodeModalParentId && treeNodeModalRenameName) {
+        if (!value) {
+          treeNodeModalInput.focus();
+          return;
+        }
+        treeNodeModalForm.action = "/projects/nodes";
+        treeNodeModalParentId.value = activeTreeNodeMeta.id;
+        treeNodeModalRenameName.value = "";
+        treeNodeModalInput.name = "name";
+        HTMLFormElement.prototype.submit.call(treeNodeModalForm);
+        return;
+      }
+      if (activeTreeModalMode === "rename" && treeNodeModalParentId && treeNodeModalRenameName) {
+        if (!value) {
+          treeNodeModalInput.focus();
+          return;
+        }
+        treeNodeModalForm.action = `/projects/nodes/${activeTreeNodeMeta.id}/rename`;
+        treeNodeModalParentId.value = "";
+        treeNodeModalRenameName.value = value;
+        treeNodeModalInput.name = "unused_name";
+        HTMLFormElement.prototype.submit.call(treeNodeModalForm);
+        return;
+      }
+      if (activeTreeModalMode === "delete" && treeDeleteForm) {
+        treeDeleteForm.action = `/projects/nodes/${activeTreeNodeMeta.id}/delete`;
+        HTMLFormElement.prototype.submit.call(treeDeleteForm);
+      }
+    });
+
+    exportForm?.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      if (getSelectedCount() === 0) {
+        hint.classList.remove("hidden");
+        return;
+      }
+      if (exportAbortController) {
+        exportAbortController.abort();
+      }
+      exportAbortController = new AbortController();
+      fillSelectedIds(exportForm);
+      configureState.classList.add("hidden");
+      packingState.classList.remove("hidden");
+      readyState.classList.add("hidden");
+      const formData = new FormData(exportForm);
+      try {
+        const response = await fetch(exportForm.action, {
+          method: "POST",
+          body: formData,
+          signal: exportAbortController.signal,
+          headers: {
+            "X-Requested-With": "XMLHttpRequest",
+          },
+        });
+        const html = await response.text();
+        readyState.innerHTML = html;
+        packingState.classList.add("hidden");
+        readyState.classList.remove("hidden");
+      } catch (error) {
+        if (error.name === "AbortError") {
+          resetExportStates();
+          return;
+        }
+        readyState.innerHTML = `
+          <div class="bg-gradient-to-b from-[#ff8b7a]/10 to-transparent px-5 pb-4 pt-5">
+            <div class="flex items-center gap-3">
+              <div class="flex h-8 w-8 items-center justify-center rounded-full bg-[#ff8b7a] text-[#0E0E10]">!</div>
+              <div>
+                <p class="text-lg font-medium tracking-tight text-white">导出失败</p>
+                <p class="mt-1 text-xs text-slate-400">请求没有完成，请再试一次。</p>
+              </div>
+            </div>
+          </div>
+        `;
+        packingState.classList.add("hidden");
+        readyState.classList.remove("hidden");
+      } finally {
+        exportAbortController = null;
+      }
     });
 
     modal.addEventListener("click", (event) => {
@@ -479,41 +1304,126 @@
       }
     });
 
-    document.body.addEventListener("htmx:beforeRequest", (event) => {
-      if (event.target && event.target.id === "export-form") {
-        fillSelectedIds(event.target);
-        configureState.classList.add("hidden");
-        packingState.classList.remove("hidden");
-        readyState.classList.add("hidden");
+    clipDeleteModal?.addEventListener("click", (event) => {
+      if (event.target === clipDeleteModal) {
+        closeClipDeleteModal();
+      }
+    });
+
+    clipMoveModal?.addEventListener("click", (event) => {
+      if (event.target === clipMoveModal) {
+        clipMoveModal.classList.add("hidden");
+        if (modal.classList.contains("hidden") && clipDeleteModal.classList.contains("hidden")) {
+          body.classList.remove("overflow-hidden");
+        }
       }
     });
 
     document.body.addEventListener("htmx:afterSwap", (event) => {
-      if (event.target && event.target.id === "export-state-ready") {
-        packingState.classList.add("hidden");
-        readyState.classList.remove("hidden");
-        bindSelectionEvents();
-      }
-
       if (event.target && event.target.id === "clip-grid") {
         bindSelectionEvents();
-        syncSelectionControlsVisibility();
       }
+      bindSelectionEvents();
+      syncSelectionControlsVisibility();
+      syncSelectionUI();
+      bindTreeToggles();
+      bindTreeContextMenu();
+      bindClipContextMenu();
+      bindTreeDragDrop();
+    });
+
+    document.body.addEventListener("click", (event) => {
+      const target = event.target;
+      if (!(target instanceof HTMLElement)) return;
+
+      const selectionControl = target.closest("[data-selection-control]");
+      if (selectionControl) {
+        if (selectionMode === "browse") return;
+        const card = selectionControl.closest("[data-clip-card]");
+        const input = card?.querySelector('input[name="selected_ids"]');
+        if (!input) return;
+        input.checked = !input.checked;
+        syncCardState(input);
+        syncSelectionUI();
+        return;
+      }
+
+      const editOpenButton = target.closest("[data-card-edit-open]");
+      if (editOpenButton) {
+        const card = editOpenButton.closest("[data-clip-card]");
+        const display = card?.querySelector("[data-card-summary-display]");
+        const form = card?.querySelector("[data-card-edit-form]");
+        if (display) display.classList.add("hidden");
+        if (form) form.classList.remove("hidden");
+        return;
+      }
+
+      const editCancelButton = target.closest("[data-card-edit-cancel]");
+      if (editCancelButton) {
+        const card = editCancelButton.closest("[data-clip-card]");
+        const display = card?.querySelector("[data-card-summary-display]");
+        const form = card?.querySelector("[data-card-edit-form]");
+        if (display) display.classList.remove("hidden");
+        if (form) form.classList.add("hidden");
+        return;
+      }
+
+      if (target.closest("[data-ignore-card-toggle]")) {
+        return;
+      }
+
+      const hitArea = target.closest("[data-card-hit-area]");
+      if (!hitArea) return;
+      const card = hitArea.closest("[data-clip-card]");
+      if (!card) return;
+
+      if (selectionMode === "browse") {
+        const href = card.dataset.clipHref;
+        if (href) {
+          window.location.href = href;
+        }
+        return;
+      }
+
+      const input = card.querySelector('input[name="selected_ids"]');
+      if (!input) return;
+      input.checked = !input.checked;
+      syncCardState(input);
+      syncSelectionUI();
     });
 
     document.addEventListener("click", (event) => {
-      if (!contextMenu.contains(event.target)) {
-        closeContextMenu();
+      if (!libraryContextMenu.classList.contains("hidden") && !libraryContextMenu.contains(event.target)) {
+        closeLibraryContextMenu();
+      }
+      if (!treeContextMenu.classList.contains("hidden") && !treeContextMenu.contains(event.target)) {
+        closeTreeContextMenu();
+      }
+      if (!clipContextMenu.classList.contains("hidden") && !clipContextMenu.contains(event.target)) {
+        clipContextMenu.classList.add("hidden");
       }
     });
 
-    document.addEventListener("scroll", closeContextMenu, true);
+    treeNodeModal?.addEventListener("click", (event) => {
+      if (event.target === treeNodeModal) {
+        closeTreeNodeModal();
+      }
+    });
+
+    document.addEventListener("scroll", () => {
+      closeLibraryContextMenu();
+      closeTreeContextMenu();
+    }, true);
 
     document.addEventListener("DOMContentLoaded", () => {
       bindSelectionEvents();
       syncSelectionControlsVisibility();
       bindLibraryContextMenu();
-      applyEditMode();
+      bindTreeToggles();
+      bindTreeContextMenu();
+      bindClipContextMenu();
+      bindTreeDragDrop();
+      setSelectionMode("browse");
     });
   })();
 </script>

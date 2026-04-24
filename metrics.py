@@ -24,6 +24,17 @@ class VideoMetrics:
 @dataclass
 class ComparisonScores:
     sharpness_score: float
+    stability_score: float
+
+
+@dataclass
+class ComparisonRanking:
+    overall_score: float
+    sharpness_score: float
+    stability_score: float
+    content_score: float
+    speech_score: float
+    composition_score: float
 
 
 def _calculate_frame_sharpness(frame_path: Path) -> float:
@@ -85,4 +96,35 @@ def build_comparison_scores(frame_paths: list[Path]) -> ComparisonScores:
         for frame_path in sorted(frame_paths)
     ]
     average_score = sum(frame_scores) / len(frame_scores)
-    return ComparisonScores(sharpness_score=average_score)
+    spread = max(frame_scores) - min(frame_scores) if len(frame_scores) > 1 else 0.0
+    stability_score = max(0.0, average_score - spread * 0.35)
+    return ComparisonScores(
+        sharpness_score=average_score,
+        stability_score=stability_score,
+    )
+
+
+def build_comparison_ranking(
+    frame_paths: list[Path],
+    *,
+    content_score: float,
+    speech_score: float,
+    composition_score: float,
+) -> ComparisonRanking:
+    """构造粗筛推荐排序用的综合分。"""
+    base_scores = build_comparison_scores(frame_paths)
+    overall_score = (
+        base_scores.sharpness_score * 0.32
+        + base_scores.stability_score * 0.18
+        + content_score * 0.2
+        + speech_score * 0.12
+        + composition_score * 0.18
+    )
+    return ComparisonRanking(
+        overall_score=overall_score,
+        sharpness_score=base_scores.sharpness_score,
+        stability_score=base_scores.stability_score,
+        content_score=content_score,
+        speech_score=speech_score,
+        composition_score=composition_score,
+    )

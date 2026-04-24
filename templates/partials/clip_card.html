@@ -1,0 +1,97 @@
+<article
+  data-clip-card
+  data-clip-id="{{ clip.id }}"
+  data-clip-summary="{{ clip.summary }}"
+  data-clip-href="/clips/{{ clip.id }}?library_id={{ current_library_id }}"
+  class="group relative overflow-hidden rounded-[20px] border border-[#2A2A30] bg-[#17171A] transition duration-200"
+>
+  <input
+    id="clip-{{ clip.id }}"
+    type="checkbox"
+    name="selected_ids"
+    value="{{ clip.id }}"
+    class="sr-only"
+  >
+
+  <button
+    type="button"
+    data-selection-control
+    data-ignore-card-toggle
+    class="absolute left-3 top-3 z-20 hidden h-7 w-7 items-center justify-center rounded-full border border-white/30 bg-black/55 text-transparent backdrop-blur transition"
+    aria-label="选择素材"
+  >
+    <span class="selection-dot h-3.5 w-3.5 rounded-full border border-white/50 bg-transparent transition"></span>
+  </button>
+
+  <div class="block cursor-pointer" data-card-hit-area>
+    <div class="relative aspect-[16/10] overflow-hidden bg-[#222228]">
+      {% if clip.cover_url %}
+      <img src="{{ clip.cover_url }}" alt="{{ clip.filename }}" class="h-full w-full object-cover transition duration-300 group-hover:scale-[1.02]">
+      {% else %}
+      <div class="flex h-full items-center justify-center text-sm text-[#8A8A92]">暂无封面</div>
+      {% endif %}
+      <div class="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/90 via-black/55 to-transparent px-4 pb-4 pt-10">
+        <div class="flex items-center justify-between gap-3">
+          <span class="text-[11px] uppercase tracking-[0.12em] text-[#8A8A92]">{{ clip.scene }}</span>
+          <span class="rounded-full border border-white/10 px-2 py-0.5 text-[10px] text-white/80">{{ clip.status }}</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="p-4">
+      <div
+        data-card-summary-display
+        class="flex items-start gap-2 {% if card_edit_open %}hidden{% endif %}"
+      >
+        <p class="line-clamp-2 flex-1 text-[17px] font-medium leading-6 tracking-[-0.01em] text-white">{{ clip.summary }}</p>
+        <button
+          type="button"
+          data-card-edit-open
+          data-ignore-card-toggle
+          class="rounded-full border border-[#2D2D34] bg-[#111114] px-2.5 py-1 text-[10px] uppercase tracking-[0.12em] text-[#8A8A92] transition hover:border-[#D7FF3E] hover:text-[#D7FF3E]"
+        >
+          edit
+        </button>
+      </div>
+      <p class="mt-2 text-[11px] uppercase tracking-[0.12em] text-[#8A8A92]">{{ current_library_name }} / {{ clip.folder_label }}</p>
+
+      <form
+        data-card-edit-form
+        data-ignore-card-toggle
+        hx-post="/clips/{{ clip.id }}/card-summary"
+        hx-target="closest article"
+        hx-swap="outerHTML"
+        class="space-y-3 {% if not card_edit_open %}hidden{% endif %}"
+      >
+        <input type="hidden" name="library_id" value="{{ current_library_id }}">
+        <textarea
+          name="summary"
+          rows="3"
+          class="w-full rounded-[14px] border border-[#313139] bg-[#0E0E10] px-3 py-3 text-sm leading-6 text-white outline-none placeholder:text-[#5A5A62] focus:border-[#D7FF3E]"
+        >{{ clip.summary }}</textarea>
+        {% if card_error %}
+        <div class="rounded-[10px] border border-[#5A2525] bg-[#2A1515] px-3 py-2 text-sm text-[#f2b4b4]">
+          {{ card_error }}
+        </div>
+        {% endif %}
+        <div class="flex items-center justify-end gap-2">
+          <button
+            type="button"
+            data-card-edit-cancel
+            data-ignore-card-toggle
+            class="rounded-full border border-[#303038] px-3 py-1.5 text-[11px] uppercase tracking-[0.08em] text-[#8A8A92] transition hover:border-white/20 hover:text-white"
+          >
+            Cancel
+          </button>
+          <button
+            type="submit"
+            data-ignore-card-toggle
+            class="rounded-full bg-[#D7FF3E] px-4 py-1.5 text-[11px] font-medium uppercase tracking-[0.08em] text-[#0E0E10]"
+          >
+            Save
+          </button>
+        </div>
+      </form>
+    </div>
+  </div>
+</article>
