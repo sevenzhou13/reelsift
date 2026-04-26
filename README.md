@@ -10,7 +10,8 @@
 - 抽取 6 张关键帧并缓存
 - 生成视觉摘要、标签、结构化分析明细
 - 可选口播识别，失败不阻塞主流程
-- SQLite 存储素材、标签、转写、文件夹树、回收站状态
+- 默认使用 SQLite 存储素材、标签、转写、文件夹树、回收站状态
+- 数据层已经改成 `DATABASE_URL` 驱动，后续可切换到 PostgreSQL
 - 素材库页支持项目树、多层文件夹、选择模式、导出、删除、对比
 - 详情页支持摘要编辑、标签追加、MY NOTE、口播重识别、前后切换、删除
 - 相似素材对比页支持推荐最佳项和一键保留
@@ -25,7 +26,7 @@
 3. 选择封面图
 4. 可选执行 ASR，失败不阻塞主流程
 5. 调用视觉模型生成摘要、标签和结构化描述
-6. 写入 SQLite
+6. 写入当前配置的数据库（默认 SQLite）
 7. 启动后台补全任务，生成浏览器预览和对比分缓存
 
 ### 视觉分析方法
@@ -69,9 +70,18 @@ cd reelsift
 
 ### 2. 创建虚拟环境
 
+macOS / Linux:
+
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
+```
+
+Windows PowerShell:
+
+```powershell
+py -3.12 -m venv .venv
+.\.venv\Scripts\Activate.ps1
 ```
 
 ### 3. 安装依赖
@@ -82,20 +92,42 @@ pip install -r requirements.txt
 
 ### 4. 安装 ffmpeg
 
+macOS:
+
 ```bash
 brew install ffmpeg
 ffmpeg -version
 ```
 
+Windows:
+
+```powershell
+winget install Gyan.FFmpeg
+ffmpeg -version
+```
+
+如果 `winget` 不可用，也可以手动安装 FFmpeg，并确保 `ffmpeg` / `ffprobe` 在系统 `PATH` 里。
+
 ### 5. 配置环境变量
+
+macOS / Linux:
 
 ```bash
 cp .env.example .env
 ```
 
+Windows PowerShell:
+
+```powershell
+Copy-Item .env.example .env
+```
+
 `.env` 至少需要填这些：
 
 ```env
+DATABASE_URL=sqlite:///./data/reelsift.db
+# PostgreSQL example:
+# DATABASE_URL=postgresql+psycopg://reelsift:password@127.0.0.1:5432/reelsift
 ARK_API_KEY=your_ark_api_key_here
 ARK_BASE_URL=https://ark.cn-beijing.volces.com/api/v3
 ARK_API_STYLE=chat
@@ -106,19 +138,85 @@ ARK_IMAGE_QUALITY=78
 VOLC_SPEECH_API_KEY=your_volc_speech_api_key_here
 ```
 
+### 数据库说明
+
+- 默认仍可使用本地 SQLite：`sqlite:///./data/reelsift.db`
+- 当前建议：
+  本地开发和单用户测试先继续用 SQLite
+  准备上云时再切 PostgreSQL
+- 如果准备上云，建议切到 PostgreSQL，并通过 `DATABASE_URL` 配置
+- 本地可以直接用仓库里的 `docker-compose.postgres.yml` 起一个 PostgreSQL 16
+
+```bash
+docker compose -f docker-compose.postgres.yml up -d
+```
+
+- 对应本地连接串示例：
+
+```env
+DATABASE_URL=postgresql+psycopg://reelsift:reelsift@127.0.0.1:5432/reelsift
+```
+
+- 已附带迁移脚本：
+
+```bash
+./.venv/bin/python migrate_sqlite_to_postgres.py \
+  --source sqlite:///./data/reelsift.db \
+  --target postgresql+psycopg://reelsift:password@127.0.0.1:5432/reelsift
+```
+
+Windows PowerShell 版本：
+
+```powershell
+python .\migrate_sqlite_to_postgres.py `
+  --source sqlite:///./data/reelsift.db `
+  --target postgresql+psycopg://reelsift:password@127.0.0.1:5432/reelsift
+```
+
 ### 6. 启动服务
 
 优先使用项目虚拟环境启动，不要直接用系统环境里的 `uvicorn`：
+
+macOS / Linux:
 
 ```bash
 ./.venv/bin/python -m uvicorn server:app --reload --host 127.0.0.1 --port 8000
 ```
 
+Windows PowerShell:
+
+```powershell
+.\.venv\Scripts\python.exe -m uvicorn server:app --reload --host 127.0.0.1 --port 8000
+```
+
+如果你在 Windows 上遇到虚拟环境位于中文路径、导致 `.venv` 里的 Python / pip 无法正常启动，可以直接使用仓库里已经准备好的脚本：
+
+先验证页面能否正常渲染：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\verify_local.ps1
+```
+
+再启动本地服务：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\run_local.ps1
+```
+
+这两个脚本会使用桌面运行时 Python，并从项目根目录下的 `.vendor/` 读取依赖，专门用于绕开 Windows 中文路径兼容问题。
+
 浏览器打开：
 
 - [http://127.0.0.1:8000](http://127.0.0.1:8000)
 
-### 7. 第一次使用建议
+### 7. Windows 兼容提醒
+
+- 仓库里原先有些命令偏向 macOS，例如 `brew install ffmpeg`、`./.venv/bin/python`
+- Windows 下请改用 `winget` 或手动安装 FFmpeg，并使用 `.\.venv\Scripts\python.exe`
+- 如果你的 Windows 用户目录或项目路径包含中文，某些虚拟环境下的可执行文件可能启动失败
+- 当前仓库已经补了 `run_local.ps1` 和 `verify_local.ps1`，Windows 用户优先使用这两个脚本即可
+- `rm -rf`、`cp`、`source` 这类命令是 Unix 风格，Windows PowerShell 下不要直接照抄
+### 8. 第一次使用建议
 
 1. 先创建一个素材库，例如 `默认素材库`
 2. 上传几条测试视频
@@ -201,6 +299,23 @@ reelsift/
 
 ## 更新记录
 
+### 2026-04-26
+
+- 增加：基础用户体系，支持普通用户登录、管理员登录、退出登录和登录态 Cookie 管理
+- 增加：按用户隔离素材库，普通用户只看到自己的素材库，管理员可查看平台范围数据
+- 增加：管理员后台 `/admin`，展示用户数、管理员数、活跃会话、素材库总量、素材总量、回收站数量和用户使用明细
+- 增加：用户注册 `/register`、账户中心 `/account`、修改密码、退出所有设备
+- 增加：管理员在 `/admin` 创建用户、重置密码、启用/停用用户、强制下线用户
+- 增加：手机号绑定与验证，账户中心可获取本地测试验证码并完成手机号验证
+- 增加：手机号找回密码 `/forgot-password`，支持通过已验证手机号获取验证码并重置密码
+- 增加：`users` 表手机号字段和 `phone_verification_codes` 验证码表，用于手机号验证和密码找回
+- 增加：README 中补充 Windows 启动、SQLite 查看、DB Browser for SQLite、PostgreSQL 切换和迁移说明
+- 增加：`run_local.ps1`、`verify_local.ps1`，方便 Windows 中文路径环境下启动和自检
+- 增加：`docker-compose.postgres.yml` 和 `migrate_sqlite_to_postgres.py`，为后续上云切 PostgreSQL 做准备
+- 更改：数据层改为 `DATABASE_URL` 驱动，默认仍使用 SQLite，后续可切 PostgreSQL
+- 更改：改密码、管理员重置密码、停用用户时会清理相关旧会话，减少旧登录态继续可用的风险
+- 说明：当前短信验证码仍是本地测试模式，会直接展示在页面里；接入真实短信服务后再替换发送逻辑
+
 ### 2026-04-24
 
 - 增加：素材库左侧项目树，支持多层文件夹、拖拽调整层级、右键新建/重命名/删除
@@ -250,7 +365,10 @@ reelsift/
 - ffmpeg-python
 - opencv-python
 - pillow
-- sqlite3
+- SQLAlchemy
+- SQLite（当前默认）
+- PostgreSQL（已支持，建议上云时切换）
+- psycopg
 - FastAPI
 - Jinja2
 - HTMX
@@ -261,8 +379,28 @@ reelsift/
 
 ### 启动 Web 界面
 
+macOS / Linux:
+
 ```bash
 ./.venv/bin/python -m uvicorn server:app --reload --host 127.0.0.1 --port 8000
+```
+
+Windows PowerShell:
+
+```powershell
+.\.venv\Scripts\python.exe -m uvicorn server:app --reload --host 127.0.0.1 --port 8000
+```
+
+Windows 兼容兜底脚本：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\run_local.ps1
+```
+
+### 本地验证
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\verify_local.ps1
 ```
 
 ### 处理一个视频目录
@@ -273,12 +411,75 @@ reelsift/
 
 ### 语法检查
 
+macOS / Linux:
+
 ```bash
 PYTHONPYCACHEPREFIX=/Users/seven/reelsift/.pycache ./.venv/bin/python -m py_compile server.py db.py metrics.py
 ```
 
+Windows PowerShell:
+
+```powershell
+.\.venv\Scripts\python.exe -m py_compile server.py db.py metrics.py
+```
+
 ### 清空缓存重新处理
+
+macOS / Linux:
 
 ```bash
 rm -rf data/thumbnails data/previews data/reelsift.db
+```
+
+Windows PowerShell:
+
+```powershell
+Remove-Item .\data\thumbnails -Recurse -Force -ErrorAction SilentlyContinue
+Remove-Item .\data\previews -Recurse -Force -ErrorAction SilentlyContinue
+Remove-Item .\data\reelsift.db -Force -ErrorAction SilentlyContinue
+```
+
+## 2026-04-24 补充说明
+
+### 用户与管理员登录
+- 当前已经加入基础的多用户隔离和管理员后台
+- 默认用户账号：`demo` / `demo123`
+- 默认管理员账号：`admin` / `admin123`
+- 普通用户登录后只会看到自己的素材库
+- 管理员可访问 `/admin` 查看平台总用户数、活跃会话、素材库总量、素材总量和用户使用明细
+- 已支持 `/register` 注册普通用户
+- 已支持 `/account` 修改密码与“退出所有设备”
+- 已支持 `/account` 绑定并验证手机号
+- 已支持 `/forgot-password` 通过已验证手机号找回密码
+- 已支持管理员在 `/admin` 创建用户、重置密码、停用用户、强制下线
+- 当前登出策略：
+  用户主动退出只清理当前会话
+  改密码会清理旧会话并为当前浏览器签发新会话
+  管理员重置密码或停用用户时，会清理该用户全部会话
+- 当前短信策略：
+  本地阶段验证码会直接展示在页面中
+  后续上云时再把验证码展示替换成真实短信服务发送
+
+### 本地查看 SQLite 数据
+- 当前默认 SQLite 文件在 `data/reelsift.db`
+- Windows 最推荐安装 `DB Browser for SQLite` 或 `DBeaver`
+- 如果想装命令行版 SQLite，Windows 可直接执行：
+
+```powershell
+winget install SQLite.SQLite
+```
+
+- 安装后可直接查看数据库：
+
+```powershell
+sqlite3 .\data\reelsift.db
+```
+
+- 常用查询：
+
+```sql
+.tables
+SELECT id, username, role, display_name FROM users;
+SELECT id, name, owner_user_id FROM libraries;
+SELECT id, filename, library_id, status FROM clips ORDER BY id DESC LIMIT 20;
 ```

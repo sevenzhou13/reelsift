@@ -6,17 +6,17 @@ import json
 import mimetypes
 import re
 import shutil
-import sqlite3
 import threading
 import time
 import uuid
+from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
 import ffmpeg
-from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Query, Request, Response, UploadFile
 from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -29,28 +29,55 @@ from db import (
     ProjectNodeRecord,
     RecycleClipRecord,
     TranscriptRecord,
+    UserRecord,
     append_clip_tags,
+    authenticate_user,
     attach_clip_to_node,
+    bind_user_phone,
+    change_user_password,
+    create_session,
+    create_user,
+    count_uncategorized_clips as db_count_uncategorized_clips,
     create_library,
     create_project_node,
+    delete_session,
     delete_clips,
     delete_library,
     delete_project_node,
+    get_admin_dashboard_stats,
     get_library_by_id,
+    get_library_by_name,
     get_project_node,
+    get_user_by_id,
+    get_user_by_session_token,
+    issue_phone_verification_code,
     init_db,
     list_libraries,
     list_project_nodes,
     list_recycled_clips,
+    list_users,
     load_transcripts,
+    query_adjacent_clip_ids,
+    query_clip_card,
+    query_clip_detail,
+    query_clips,
+    query_export_clips,
+    query_similar_clips,
+    query_tag_counts,
     rename_library,
     restore_recycled_clips,
+    reset_password_by_phone,
+    revoke_user_sessions,
     rename_project_node,
     save_clip,
     save_transcripts,
+    update_user_password,
+    update_user_status,
     move_project_node,
     move_clip_to_node,
+    update_clip_asset_state as db_update_clip_asset_state,
     update_clip_note,
+    update_clip_transcript_state as db_update_clip_transcript_state,
     update_clip_summary,
 )
 from metrics import build_comparison_ranking, build_comparison_scores, select_cover_frame
@@ -65,6 +92,7 @@ PICKS_DIR = BASE_DIR / "data" / "picks"
 UPLOADS_DIR = BASE_DIR / "data" / "uploads"
 CACHE_DIR = BASE_DIR / "data" / "thumbnails"
 PREVIEWS_DIR = BASE_DIR / "data" / "previews"
+SESSION_COOKIE_NAME = "reelsift_session"
 
 STAGE_META = {
     "queued": {"label": "排队中", "progress": 8},
@@ -177,17 +205,111 @@ ASSET_LOCK = threading.Lock()
 TREE_COLLAPSE_KEY = "reelsift-tree-collapsed"
 
 
+def is_admin(user: UserRecord | None) -> bool:
+    return user is not None and user.role == "admin"
+
+
+def is_default_account(user: UserRecord | None) -> bool:
+    return user is not None and user.username in {"admin", "demo"}
+
+
+def get_current_user(request: Request) -> UserRecord | None:
+    cached = getattr(request.state, "current_user", None)
+    if cached is not None:
+        return cached
+    session_token = request.cookies.get(SESSION_COOKIE_NAME, "").strip()
+    user = get_user_by_session_token(session_token, DB_PATH) if session_token else None
+    request.state.current_user = user
+    return user
+
+
+def get_current_session_token(request: Request) -> str:
+    return request.cookies.get(SESSION_COOKIE_NAME, "").strip()
+
+
+def require_user(request: Request) -> UserRecord:
+    user = get_current_user(request)
+    if user is None:
+        raise HTTPException(status_code=303, detail="请先登录。")
+    return user
+
+
+def require_admin(request: Request) -> UserRecord:
+    user = require_user(request)
+    if not is_admin(user):
+        raise HTTPException(status_code=403, detail="仅管理员可访问。")
+    return user
+
+
+def get_visible_libraries(request: Request) -> list[LibraryRecord]:
+    user = require_user(request)
+    if is_admin(user):
+        return list_libraries(DB_PATH, include_all=True)
+    return list_libraries(DB_PATH, owner_user_id=user.id, include_all=False)
+
+
+def get_accessible_library(request: Request, library_id: int | None = None) -> LibraryRecord:
+    user = require_user(request)
+    if is_admin(user):
+        library = get_library_by_id(library_id, DB_PATH, include_all=True) if library_id is not None else None
+    else:
+        library = (
+            get_library_by_id(library_id, DB_PATH, owner_user_id=user.id, include_all=False)
+            if library_id is not None else None
+        )
+    if library is None:
+        libraries = get_visible_libraries(request)
+        if not libraries:
+            default_name = f"{user.display_name} 的素材库" if not is_admin(user) else "默认素材库"
+            created_library = create_library(default_name, DB_PATH, owner_user_id=user.id)
+            return created_library
+        return libraries[0]
+    return library
+
+
+def require_accessible_library(request: Request, library_id: int) -> LibraryRecord:
+    user = require_user(request)
+    library = (
+        get_library_by_id(library_id, DB_PATH, include_all=True)
+        if is_admin(user)
+        else get_library_by_id(library_id, DB_PATH, owner_user_id=user.id, include_all=False)
+    )
+    if library is None:
+        raise HTTPException(status_code=404, detail="素材库不存在或无权访问。")
+    return library
+
+
+def require_accessible_clip(request: Request, clip_id: int) -> ClipDetail:
+    clip = load_clip_detail(clip_id)
+    if clip is None:
+        raise HTTPException(status_code=404, detail="素材不存在。")
+    require_accessible_library(request, clip.library_id)
+    return clip
+
+
+def build_common_context(request: Request) -> dict[str, Any]:
+    user = get_current_user(request)
+    return {
+        "current_user": user,
+        "is_admin": is_admin(user),
+        "is_default_account": is_default_account(user),
+    }
+
+
+@app.middleware("http")
+async def require_login_middleware(request: Request, call_next):
+    path = request.url.path
+    public_prefixes = ("/static", "/login", "/admin/login", "/register", "/forgot-password")
+    if path.startswith(public_prefixes) or path == "/favicon.ico":
+        return await call_next(request)
+    if get_current_user(request) is None:
+        return RedirectResponse(url="/login", status_code=303)
+    return await call_next(request)
+
+
 def build_uncategorized_node_id(library_id: int) -> int:
     """返回当前素材库的未分类虚拟节点 ID。"""
     return -1000000 - library_id
-
-
-def get_connection() -> sqlite3.Connection:
-    """创建只读连接用于页面查询。"""
-    conn = sqlite3.connect(DB_PATH, timeout=10.0)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA busy_timeout = 10000;")
-    return conn
 
 
 def build_cover_url(cover_path: str | None) -> str | None:
@@ -319,18 +441,11 @@ def build_transcript_panel_context(clip: ClipDetail) -> dict[str, Any]:
     return {"clip": clip}
 
 
-def resolve_library_id(library_id: int | None = None) -> int:
+def resolve_library_id(request: Request, library_id: int | None = None) -> int:
     """返回当前要查看的素材库 ID。"""
-    libraries = list_libraries(DB_PATH)
-    if not libraries:
-        default_library = create_library("默认素材库", DB_PATH)
-        return default_library.id
-    if library_id is None:
-        return libraries[0].id
-    library = get_library_by_id(library_id, DB_PATH)
-    if library is None:
-        return libraries[0].id
-    return library.id
+    if library_id is not None:
+        return require_accessible_library(request, library_id).id
+    return get_accessible_library(request, library_id).id
 
 
 def resolve_node_id(library_id: int, node_id: int | None = None) -> int | None:
@@ -396,28 +511,7 @@ def build_project_tree(
 
 def count_uncategorized_clips(library_id: int) -> int:
     """统计当前素材库未归入任何子文件夹的素材数。"""
-    conn = get_connection()
-    row = conn.execute(
-        """
-        SELECT COUNT(DISTINCT c.id) AS count
-        FROM clips c
-        LEFT JOIN recycled_clips rc ON rc.clip_id = c.id
-        WHERE c.library_id = ?
-          AND c.status = 'done'
-          AND rc.clip_id IS NULL
-          AND NOT EXISTS (
-              SELECT 1
-              FROM clip_node_refs ref
-              JOIN project_nodes n ON n.id = ref.node_id
-              WHERE ref.clip_id = c.id
-                AND n.library_id = c.library_id
-                AND n.parent_id IS NOT NULL
-          )
-        """,
-        (library_id,),
-    ).fetchone()
-    conn.close()
-    return int(row["count"]) if row is not None else 0
+    return db_count_uncategorized_clips(library_id, DB_PATH)
 
 
 def clamp_score(value: float, *, minimum: float = 0.0, maximum: float = 100.0) -> float:
@@ -457,6 +551,7 @@ def build_compare_payload(clip: ClipDetail) -> dict[str, Any]:
         composition_score=composition_score,
     )
     return {
+        **build_common_context(request),
         "clip": clip,
         "overall_score": ranking.overall_score,
         "sharpness_score": ranking.sharpness_score,
@@ -502,307 +597,80 @@ def build_recommendation_reason(item: dict[str, Any], compare_items: list[dict[s
     return " ".join(reasons[:3])
 
 
+def build_clip_card_from_row(row: dict[str, Any]) -> ClipCard:
+    """把数据库查询结果转换成页面卡片对象。"""
+    folder_names = row.get("folder_names") or []
+    comparison_scores_json = row.get("comparison_scores_json")
+    return ClipCard(
+        id=int(row["id"]),
+        filename=row["filename"],
+        filepath=row["filepath"],
+        summary=row.get("summary") or "暂无摘要",
+        scene=row.get("scene") or "未识别场景",
+        subjects=list(row.get("subjects_json") or []),
+        actions=list(row.get("actions_json") or []),
+        tags=list(row.get("tags") or []),
+        has_motion=bool(row.get("has_motion")) if row.get("has_motion") is not None else False,
+        sharpness_score=row.get("sharpness_score"),
+        cover_url=build_cover_url(row.get("cover_path")),
+        status=row.get("status") or "pending",
+        visual_error_message=row.get("error_message"),
+        transcript_status=row.get("transcript_status") or "pending",
+        transcript_error_message=row.get("transcript_error_message"),
+        preview_status=row.get("preview_status") or "pending",
+        comparison_status=row.get("comparison_status") or "pending",
+        comparison_scores=json.loads(comparison_scores_json) if comparison_scores_json else None,
+        comparison_error_message=row.get("comparison_error_message"),
+        folder_label=folder_names[0] if folder_names else "未分类",
+    )
+
+
 def load_clips(
+    request: Request,
     query: str = "",
     tag: str = "",
     include_failed: bool = False,
     library_id: int | None = None,
     node_id: int | None = None,
 ) -> list[ClipCard]:
-    """从 SQLite 读取素材卡片数据，并支持关键词与标签过滤。"""
-    conn = get_connection()
-    filters: list[str] = []
-    params: list[Any] = []
-    current_library_id = resolve_library_id(library_id)
+    """读取素材卡片数据，并支持关键词与标签过滤。"""
+    current_library_id = resolve_library_id(request, library_id)
     current_uncategorized_id = build_uncategorized_node_id(current_library_id)
-
-    filters.append("c.library_id = ?")
-    params.append(current_library_id)
-    filters.append("rc.clip_id IS NULL")
-
-    if node_id is not None:
-        if node_id == current_uncategorized_id:
-            filters.append(
-                """
-                NOT EXISTS (
-                    SELECT 1
-                    FROM clip_node_refs ref2
-                    JOIN project_nodes n2 ON n2.id = ref2.node_id
-                    WHERE ref2.clip_id = c.id
-                      AND n2.library_id = c.library_id
-                      AND n2.parent_id IS NOT NULL
-                )
-                """
-            )
-        else:
-            filters.append(
-                """
-                EXISTS (
-                    SELECT 1
-                    FROM clip_node_refs ref2
-                    WHERE ref2.clip_id = c.id AND ref2.node_id = ?
-                )
-                """
-            )
-            params.append(node_id)
-
-    if not include_failed:
-        filters.append("c.status = 'done'")
-
-    if query:
-        filters.append(
-            """
-            (
-                c.filename LIKE ?
-                OR c.summary LIKE ?
-                OR c.scene LIKE ?
-                OR EXISTS (
-                    SELECT 1 FROM clip_tags t2
-                    WHERE t2.clip_id = c.id AND t2.tag LIKE ?
-                )
-            )
-            """
-        )
-        like_query = f"%{query}%"
-        params.extend([like_query, like_query, like_query, like_query])
-
-    if tag:
-        filters.append(
-            """
-            EXISTS (
-                SELECT 1 FROM clip_tags t3
-                WHERE t3.clip_id = c.id AND t3.tag = ?
-            )
-            """
-        )
-        params.append(tag)
-
-    where_sql = f"WHERE {' AND '.join(filters)}" if filters else ""
-    rows = conn.execute(
-        f"""
-        SELECT
-            c.id,
-            c.filename,
-            c.filepath,
-            c.summary,
-            c.scene,
-            c.subjects_json,
-            c.actions_json,
-            c.has_motion,
-            c.sharpness_score,
-            c.cover_path,
-            c.status,
-            c.error_message,
-            c.transcript_status,
-            c.transcript_error_message,
-            c.preview_status,
-            c.preview_path,
-            c.preview_error_message,
-            c.comparison_status,
-            c.comparison_scores_json,
-            c.comparison_error_message,
-            (
-                SELECT GROUP_CONCAT(n3.name, '|||')
-                FROM clip_node_refs ref3
-                JOIN project_nodes n3 ON n3.id = ref3.node_id
-                WHERE ref3.clip_id = c.id
-                  AND n3.library_id = c.library_id
-                  AND n3.parent_id IS NOT NULL
-            ) AS folder_names_text,
-            GROUP_CONCAT(t.tag, '|||') AS tags_text
-        FROM clips c
-        LEFT JOIN clip_tags t ON t.clip_id = c.id
-        LEFT JOIN recycled_clips rc ON rc.clip_id = c.id
-        {where_sql}
-        GROUP BY c.id
-        ORDER BY c.updated_at DESC, c.id DESC
-        """,
-        params,
-    ).fetchall()
-    conn.close()
-
-    cards: list[ClipCard] = []
-    for row in rows:
-        cards.append(
-            ClipCard(
-                id=int(row["id"]),
-                filename=row["filename"],
-                filepath=row["filepath"],
-                summary=row["summary"] or "暂无摘要",
-                scene=row["scene"] or "未识别场景",
-                subjects=json.loads(row["subjects_json"] or "[]"),
-                actions=json.loads(row["actions_json"] or "[]"),
-                tags=(row["tags_text"] or "").split("|||") if row["tags_text"] else [],
-                has_motion=bool(row["has_motion"]) if row["has_motion"] is not None else False,
-                sharpness_score=row["sharpness_score"],
-                cover_url=build_cover_url(row["cover_path"]),
-                status=row["status"],
-                visual_error_message=row["error_message"],
-                transcript_status=row["transcript_status"] or "pending",
-                transcript_error_message=row["transcript_error_message"],
-                preview_status=row["preview_status"] or "pending",
-                comparison_status=row["comparison_status"] or "pending",
-                comparison_scores=json.loads(row["comparison_scores_json"]) if row["comparison_scores_json"] else None,
-                comparison_error_message=row["comparison_error_message"],
-                folder_label=((row["folder_names_text"] or "").split("|||")[0] if row["folder_names_text"] else "未分类"),
-            )
-        )
-    return cards
+    rows = query_clips(
+        library_id=current_library_id,
+        query=query.strip(),
+        tag=tag.strip(),
+        include_failed=include_failed,
+        node_id=node_id,
+        uncategorized_node_id=current_uncategorized_id,
+        db_path=DB_PATH,
+    )
+    return [build_clip_card_from_row(row) for row in rows]
 
 
 def load_clip_card(clip_id: int) -> ClipCard | None:
     """读取单条素材卡片数据。"""
-    conn = get_connection()
-    row = conn.execute(
-        """
-        SELECT
-            c.id,
-            c.filename,
-            c.filepath,
-            c.summary,
-            c.scene,
-            c.subjects_json,
-            c.actions_json,
-            c.has_motion,
-            c.sharpness_score,
-            c.cover_path,
-            c.status,
-            c.error_message,
-            c.transcript_status,
-            c.transcript_error_message,
-            c.preview_status,
-            c.preview_path,
-            c.preview_error_message,
-            c.comparison_status,
-            c.comparison_scores_json,
-            c.comparison_error_message,
-            (
-                SELECT GROUP_CONCAT(n3.name, '|||')
-                FROM clip_node_refs ref3
-                JOIN project_nodes n3 ON n3.id = ref3.node_id
-                WHERE ref3.clip_id = c.id
-                  AND n3.library_id = c.library_id
-                  AND n3.parent_id IS NOT NULL
-            ) AS folder_names_text,
-            GROUP_CONCAT(t.tag, '|||') AS tags_text
-        FROM clips c
-        LEFT JOIN clip_tags t ON t.clip_id = c.id
-        WHERE c.id = ?
-        GROUP BY c.id
-        """,
-        (clip_id,),
-    ).fetchone()
-    conn.close()
+    row = query_clip_card(clip_id, DB_PATH)
     if row is None:
         return None
-    return ClipCard(
-        id=int(row["id"]),
-        filename=row["filename"],
-        filepath=row["filepath"],
-        summary=row["summary"] or "暂无摘要",
-        scene=row["scene"] or "未识别场景",
-        subjects=json.loads(row["subjects_json"] or "[]"),
-        actions=json.loads(row["actions_json"] or "[]"),
-        tags=(row["tags_text"] or "").split("|||") if row["tags_text"] else [],
-        has_motion=bool(row["has_motion"]) if row["has_motion"] is not None else False,
-        sharpness_score=row["sharpness_score"],
-        cover_url=build_cover_url(row["cover_path"]),
-        status=row["status"],
-        visual_error_message=row["error_message"],
-        transcript_status=row["transcript_status"] or "pending",
-        transcript_error_message=row["transcript_error_message"],
-        preview_status=row["preview_status"] or "pending",
-        comparison_status=row["comparison_status"] or "pending",
-        comparison_scores=json.loads(row["comparison_scores_json"]) if row["comparison_scores_json"] else None,
-        comparison_error_message=row["comparison_error_message"],
-        folder_label=((row["folder_names_text"] or "").split("|||")[0] if row["folder_names_text"] else "未分类"),
-    )
+    return build_clip_card_from_row(row)
 
 
-def load_tags(library_id: int | None = None, node_id: int | None = None) -> list[tuple[str, int]]:
+def load_tags(request: Request, library_id: int | None = None, node_id: int | None = None) -> list[tuple[str, int]]:
     """读取所有标签及其数量。"""
-    conn = get_connection()
-    current_library_id = resolve_library_id(library_id)
-    params: list[Any] = [current_library_id]
-    node_filter = ""
+    current_library_id = resolve_library_id(request, library_id)
     current_uncategorized_id = build_uncategorized_node_id(current_library_id)
-    if node_id is not None:
-        if node_id == current_uncategorized_id:
-            node_filter = """
-            AND NOT EXISTS (
-                SELECT 1
-                FROM clip_node_refs ref2
-                JOIN project_nodes n2 ON n2.id = ref2.node_id
-                WHERE ref2.clip_id = c.id
-                  AND n2.library_id = c.library_id
-                  AND n2.parent_id IS NOT NULL
-            )
-            """
-        else:
-            node_filter = """
-            AND EXISTS (
-                SELECT 1
-                FROM clip_node_refs ref2
-                WHERE ref2.clip_id = c.id AND ref2.node_id = ?
-            )
-            """
-            params.append(node_id)
-    rows = conn.execute(
-        f"""
-        SELECT t.tag, COUNT(DISTINCT t.clip_id) AS count
-        FROM clip_tags t
-        JOIN clips c ON c.id = t.clip_id
-        LEFT JOIN recycled_clips rc ON rc.clip_id = c.id
-        WHERE c.library_id = ? AND c.status = 'done' AND rc.clip_id IS NULL {node_filter}
-        GROUP BY t.tag
-        ORDER BY count DESC, t.tag ASC
-        """,
-        params,
-    ).fetchall()
-    conn.close()
-    return [(row["tag"], int(row["count"])) for row in rows]
+    return query_tag_counts(
+        current_library_id,
+        node_id=node_id,
+        uncategorized_node_id=current_uncategorized_id,
+        db_path=DB_PATH,
+    )
 
 
 def load_clip_detail(clip_id: int) -> ClipDetail | None:
     """读取单条素材详情。"""
-    conn = get_connection()
-    row = conn.execute(
-        """
-        SELECT
-            c.id,
-            c.library_id,
-            c.filename,
-            c.filepath,
-            c.summary,
-            c.scene,
-            c.subjects_json,
-            c.actions_json,
-            c.has_motion,
-            c.sharpness_score,
-            c.cover_path,
-            c.status,
-            c.error_message,
-            c.transcript_status,
-            c.transcript_error_message,
-            c.preview_status,
-            c.preview_path,
-            c.preview_error_message,
-            c.comparison_status,
-            c.comparison_scores_json,
-            c.comparison_error_message,
-            c.user_note,
-            l.name AS library_name,
-            GROUP_CONCAT(t.tag, '|||') AS tags_text
-        FROM clips c
-        LEFT JOIN libraries l ON l.id = c.library_id
-        LEFT JOIN clip_tags t ON t.clip_id = c.id
-        WHERE c.id = ?
-        GROUP BY c.id
-        """,
-        (clip_id,),
-    ).fetchone()
-    conn.close()
-
+    row = query_clip_detail(clip_id, DB_PATH)
     if row is None:
         return None
 
@@ -812,20 +680,20 @@ def load_clip_detail(clip_id: int) -> ClipDetail | None:
     media_url: str | None = None
     media_type: str | None = None
     media_error_message: str | None = None
-    preview_status = row["preview_status"] or "pending"
+    preview_status = row.get("preview_status") or "pending"
     if file_path.exists():
         stat = file_path.stat()
         file_size_text = format_file_size(stat.st_size)
         shot_time_text = datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M")
-        preview_path = row["preview_path"]
+        preview_path = row.get("preview_path")
         if preview_path:
             media_url = build_data_url_from_path(preview_path)
             media_type = "video/mp4"
-        media_error_message = row["preview_error_message"]
+        media_error_message = row.get("preview_error_message")
 
-    cover_path = row["cover_path"]
+    cover_path = row.get("cover_path")
     transcript_records = load_transcripts(clip_id, DB_PATH)
-    transcript_status = normalize_transcript_status(row["transcript_status"], transcript_records)
+    transcript_status = normalize_transcript_status(row.get("transcript_status"), transcript_records)
     transcripts = [
         {
             "start_ms": item.start_ms,
@@ -838,126 +706,46 @@ def load_clip_detail(clip_id: int) -> ClipDetail | None:
     return ClipDetail(
         id=int(row["id"]),
         library_id=int(row["library_id"]),
-        library_name=row["library_name"] or "默认素材库",
+        library_name=row.get("library_name") or "默认素材库",
         filename=row["filename"],
         filepath=row["filepath"],
-        summary=row["summary"] or "暂无摘要",
-        scene=row["scene"] or "未识别场景",
-        subjects=json.loads(row["subjects_json"] or "[]"),
-        actions=json.loads(row["actions_json"] or "[]"),
-        tags=(row["tags_text"] or "").split("|||") if row["tags_text"] else [],
-        has_motion=bool(row["has_motion"]) if row["has_motion"] is not None else False,
-        sharpness_score=row["sharpness_score"],
+        summary=row.get("summary") or "暂无摘要",
+        scene=row.get("scene") or "未识别场景",
+        subjects=list(row.get("subjects_json") or []),
+        actions=list(row.get("actions_json") or []),
+        tags=list(row.get("tags") or []),
+        has_motion=bool(row.get("has_motion")) if row.get("has_motion") is not None else False,
+        sharpness_score=row.get("sharpness_score"),
         cover_url=build_cover_url(cover_path),
         keyframe_urls=build_keyframe_urls(cover_path),
         media_url=media_url,
         media_type=media_type,
         media_error_message=media_error_message,
         preview_status=preview_status,
-        status=row["status"],
-        visual_error_message=row["error_message"],
+        status=row.get("status") or "pending",
+        visual_error_message=row.get("error_message"),
         file_size_text=file_size_text,
         shot_time_text=shot_time_text,
         transcripts=transcripts,
         transcript_available=is_asr_configured(),
         transcript_status=transcript_status,
-        transcript_error_message=row["transcript_error_message"],
-        comparison_scores=json.loads(row["comparison_scores_json"]) if row["comparison_scores_json"] else None,
-        comparison_status=row["comparison_status"] or "pending",
-        comparison_error_message=row["comparison_error_message"],
-        user_note=row["user_note"],
+        transcript_error_message=row.get("transcript_error_message"),
+        comparison_scores=json.loads(row["comparison_scores_json"]) if row.get("comparison_scores_json") else None,
+        comparison_status=row.get("comparison_status") or "pending",
+        comparison_error_message=row.get("comparison_error_message"),
+        user_note=row.get("user_note"),
     )
 
 
 def load_similar_clips(current_clip_id: int, scene: str, limit: int = 3) -> list[ClipCard]:
     """按相同场景读取相似素材，用于详情页侧边展示。"""
-    conn = get_connection()
-    rows = conn.execute(
-        """
-        SELECT
-            c.id,
-            c.filename,
-            c.filepath,
-            c.summary,
-            c.scene,
-            c.subjects_json,
-            c.actions_json,
-            c.has_motion,
-            c.sharpness_score,
-            c.cover_path,
-            c.status,
-            c.error_message,
-            c.transcript_status,
-            c.transcript_error_message,
-            c.preview_status,
-            c.preview_path,
-            c.preview_error_message,
-            c.comparison_status,
-            c.comparison_scores_json,
-            c.comparison_error_message,
-            GROUP_CONCAT(t.tag, '|||') AS tags_text
-        FROM clips c
-        LEFT JOIN clip_tags t ON t.clip_id = c.id
-        WHERE c.id != ? AND c.scene = ?
-        GROUP BY c.id
-        ORDER BY c.updated_at DESC, c.id DESC
-        LIMIT ?
-        """,
-        (current_clip_id, scene, limit),
-    ).fetchall()
-    conn.close()
-
-    cards: list[ClipCard] = []
-    for row in rows:
-        cards.append(
-            ClipCard(
-                id=int(row["id"]),
-                filename=row["filename"],
-                filepath=row["filepath"],
-                summary=row["summary"] or "暂无摘要",
-                scene=row["scene"] or "未识别场景",
-                subjects=json.loads(row["subjects_json"] or "[]"),
-                actions=json.loads(row["actions_json"] or "[]"),
-                tags=(row["tags_text"] or "").split("|||") if row["tags_text"] else [],
-                has_motion=bool(row["has_motion"]) if row["has_motion"] is not None else False,
-                sharpness_score=row["sharpness_score"],
-                cover_url=build_cover_url(row["cover_path"]),
-                status=row["status"],
-                visual_error_message=row["error_message"],
-                transcript_status=row["transcript_status"] or "pending",
-                transcript_error_message=row["transcript_error_message"],
-                preview_status=row["preview_status"] or "pending",
-                comparison_status=row["comparison_status"] or "pending",
-                comparison_scores=json.loads(row["comparison_scores_json"]) if row["comparison_scores_json"] else None,
-                comparison_error_message=row["comparison_error_message"],
-            )
-        )
-    return cards
+    rows = query_similar_clips(current_clip_id, scene, limit=limit, db_path=DB_PATH)
+    return [build_clip_card_from_row(row) for row in rows]
 
 
 def load_adjacent_clip_ids(clip_id: int, library_id: int) -> tuple[int | None, int | None]:
     """按素材库当前排序查找上一条和下一条素材。"""
-    conn = get_connection()
-    rows = conn.execute(
-        """
-        SELECT id
-        FROM clips
-        WHERE library_id = ?
-        ORDER BY updated_at DESC, id DESC
-        """,
-        (library_id,),
-    ).fetchall()
-    conn.close()
-
-    ordered_ids = [int(row["id"]) for row in rows]
-    try:
-        current_index = ordered_ids.index(clip_id)
-    except ValueError:
-        return None, None
-
-    previous_id = ordered_ids[current_index - 1] if current_index > 0 else None
-    next_id = ordered_ids[current_index + 1] if current_index < len(ordered_ids) - 1 else None
-    return previous_id, next_id
+    return query_adjacent_clip_ids(clip_id, library_id, DB_PATH)
 
 
 def build_stats(clips: list[ClipCard]) -> dict[str, int]:
@@ -995,41 +783,43 @@ def save_uploaded_files(files: list[UploadFile]) -> list[Path]:
     return saved_paths
 
 
-def resolve_upload_library(library_id_input: int | None, new_library_name: str) -> LibraryRecord:
+def resolve_upload_library(request: Request, library_id_input: int | None, new_library_name: str) -> LibraryRecord:
     """根据上传页输入，决定这批视频要归属的素材库。"""
+    user = require_user(request)
     cleaned_name = new_library_name.strip()
     if cleaned_name:
         try:
-            return create_library(cleaned_name, DB_PATH)
+            return create_library(cleaned_name, DB_PATH, owner_user_id=user.id)
         except ValueError as exc:
+            existing_library = get_library_by_name(
+                cleaned_name,
+                DB_PATH,
+                owner_user_id=None if is_admin(user) else user.id,
+                include_all=is_admin(user),
+            )
+            if existing_library is not None:
+                return existing_library
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        except sqlite3.IntegrityError:
-            conn = get_connection()
-            row = conn.execute(
-                "SELECT id, name FROM libraries WHERE name = ?",
-                (cleaned_name,),
-            ).fetchone()
-            if row is None:
-                raise HTTPException(status_code=400, detail="素材库创建失败，请换一个名称再试。")
-            return LibraryRecord(id=int(row["id"]), name=row["name"], clip_count=0)
 
-    current_library_id = resolve_library_id(library_id_input)
-    library = get_library_by_id(current_library_id, DB_PATH)
+    current_library_id = resolve_library_id(request, library_id_input)
+    library = get_accessible_library(request, current_library_id)
     if library is None:
         raise HTTPException(status_code=400, detail="选中的素材库不存在。")
     return library
 
 
 def build_upload_page_context(
+    request: Request,
     upload_job: UploadJobState | None = None,
     error_message: str | None = None,
     selected_library_id: int | None = None,
     pending_library_name: str = "",
 ) -> dict[str, Any]:
     """构造上传页上下文。"""
-    libraries = list_libraries(DB_PATH)
-    current_library_id = resolve_library_id(selected_library_id)
+    libraries = get_visible_libraries(request)
+    current_library_id = resolve_library_id(request, selected_library_id)
     return {
+        **build_common_context(request),
         "upload_job": upload_job,
         "upload_error": error_message,
         "libraries": libraries,
@@ -1177,17 +967,12 @@ def update_clip_transcript_state(
     transcript_error_message: str | None,
 ) -> None:
     """只更新 transcript 相关状态，避免覆盖视觉分析结果。"""
-    conn = get_connection()
-    conn.execute(
-        """
-        UPDATE clips
-        SET transcript_status = ?, transcript_error_message = ?, updated_at = CURRENT_TIMESTAMP
-        WHERE id = ?
-        """,
-        (transcript_status, transcript_error_message, clip.id),
+    db_update_clip_transcript_state(
+        clip.id,
+        transcript_status=transcript_status,
+        transcript_error_message=transcript_error_message,
+        db_path=DB_PATH,
     )
-    conn.commit()
-    conn.close()
 
 
 def update_clip_asset_state(
@@ -1201,41 +986,16 @@ def update_clip_asset_state(
     comparison_error_message: str | None | object = None,
 ) -> None:
     """更新预览和对比分缓存状态。"""
-    conn = get_connection()
-    updates: list[str] = []
-    params: list[Any] = []
-
-    if preview_status is not None:
-        updates.append("preview_status = ?")
-        params.append(preview_status)
-    if preview_path is not None:
-        updates.append("preview_path = ?")
-        params.append(str(preview_path))
-    if preview_error_message is not None:
-        updates.append("preview_error_message = ?")
-        params.append(preview_error_message)
-    if comparison_status is not None:
-        updates.append("comparison_status = ?")
-        params.append(comparison_status)
-    if comparison_scores is not None:
-        updates.append("comparison_scores_json = ?")
-        params.append(json.dumps(comparison_scores, ensure_ascii=False))
-    if comparison_error_message is not None:
-        updates.append("comparison_error_message = ?")
-        params.append(comparison_error_message)
-
-    if not updates:
-        conn.close()
-        return
-
-    updates.append("updated_at = CURRENT_TIMESTAMP")
-    params.append(clip_id)
-    conn.execute(
-        f"UPDATE clips SET {', '.join(updates)} WHERE id = ?",
-        params,
+    db_update_clip_asset_state(
+        clip_id,
+        preview_status=preview_status,
+        preview_path=preview_path,
+        preview_error_message=preview_error_message,
+        comparison_status=comparison_status,
+        comparison_scores=comparison_scores,
+        comparison_error_message=comparison_error_message,
+        db_path=DB_PATH,
     )
-    conn.commit()
-    conn.close()
 
 
 def start_clip_asset_job(clip_id: int) -> None:
@@ -1494,17 +1254,7 @@ def export_clips_by_ids(clip_ids: list[int], destination_input: str = "") -> dic
             "message": "请先选择要导出的素材。",
         }
 
-    conn = get_connection()
-    placeholders = ",".join("?" for _ in clip_ids)
-    rows = conn.execute(
-        f"""
-        SELECT id, filename, filepath, summary
-        FROM clips
-        WHERE id IN ({placeholders})
-        ORDER BY id ASC
-        """,
-        clip_ids,
-    ).fetchall()
+    rows = query_export_clips(clip_ids, DB_PATH)
 
     destination_dir.mkdir(parents=True, exist_ok=True)
     copied: list[str] = []
@@ -1549,6 +1299,458 @@ def parse_selected_ids(raw_selected_ids: list[str]) -> list[int]:
     return selected_ids
 
 
+@app.get("/login", include_in_schema=False)
+def login_page(request: Request, next_url: str = Query(default="/"), error: str = Query(default="")):
+    user = get_current_user(request)
+    if user is not None:
+        return RedirectResponse(url=next_url or "/", status_code=303)
+    return templates.TemplateResponse(
+        request=request,
+        name="login.html",
+        context={
+            **build_common_context(request),
+            "login_title": "用户登录",
+            "login_action": "/login",
+            "next_url": next_url or "/",
+            "error_message": error.strip(),
+            "admin_only": False,
+        },
+    )
+
+
+@app.post("/login", include_in_schema=False)
+def login_action(
+    request: Request,
+    username: str = Form(...),
+    password: str = Form(...),
+    next_url: str = Form(default="/"),
+):
+    user = authenticate_user(username, password, DB_PATH)
+    if user is None:
+        return templates.TemplateResponse(
+            request=request,
+            name="login.html",
+            context={
+                **build_common_context(request),
+                "login_title": "用户登录",
+                "login_action": "/login",
+                "next_url": next_url or "/",
+                "error_message": "用户名或密码不正确。",
+                "admin_only": False,
+            },
+            status_code=400,
+        )
+    response = RedirectResponse(url=next_url or "/", status_code=303)
+    response.set_cookie(
+        key=SESSION_COOKIE_NAME,
+        value=create_session(user.id, DB_PATH),
+        httponly=True,
+        samesite="lax",
+        max_age=7 * 24 * 60 * 60,
+    )
+    return response
+
+
+@app.get("/admin/login", include_in_schema=False)
+def admin_login_page(request: Request, error: str = Query(default="")):
+    user = get_current_user(request)
+    if is_admin(user):
+        return RedirectResponse(url="/admin", status_code=303)
+    return templates.TemplateResponse(
+        request=request,
+        name="login.html",
+        context={
+            **build_common_context(request),
+            "login_title": "管理员登录",
+            "login_action": "/admin/login",
+            "next_url": "/admin",
+            "error_message": error.strip(),
+            "admin_only": True,
+        },
+    )
+
+
+@app.post("/admin/login", include_in_schema=False)
+def admin_login_action(
+    request: Request,
+    username: str = Form(...),
+    password: str = Form(...),
+):
+    user = authenticate_user(username, password, DB_PATH)
+    if user is None or not is_admin(user):
+        return templates.TemplateResponse(
+            request=request,
+            name="login.html",
+            context={
+                **build_common_context(request),
+                "login_title": "管理员登录",
+                "login_action": "/admin/login",
+                "next_url": "/admin",
+                "error_message": "管理员账号或密码不正确。",
+                "admin_only": True,
+            },
+            status_code=400,
+        )
+    response = RedirectResponse(url="/admin", status_code=303)
+    response.set_cookie(
+        key=SESSION_COOKIE_NAME,
+        value=create_session(user.id, DB_PATH),
+        httponly=True,
+        samesite="lax",
+        max_age=7 * 24 * 60 * 60,
+    )
+    return response
+
+
+@app.post("/logout", include_in_schema=False)
+def logout_action(request: Request):
+    session_token = request.cookies.get(SESSION_COOKIE_NAME, "").strip()
+    with suppress(Exception):
+        delete_session(session_token, DB_PATH)
+    response = RedirectResponse(url="/login", status_code=303)
+    response.delete_cookie(SESSION_COOKIE_NAME)
+    return response
+
+
+@app.get("/admin", include_in_schema=False)
+def admin_dashboard_page(
+    request: Request,
+    error: str = Query(default=""),
+    success: str = Query(default=""),
+):
+    require_admin(request)
+    return templates.TemplateResponse(
+        request=request,
+        name="admin_dashboard.html",
+        context={
+            **build_common_context(request),
+            "dashboard": get_admin_dashboard_stats(DB_PATH),
+            "users": list_users(DB_PATH),
+            "user_create_error": "",
+            "user_create_success": "",
+            "user_action_error": error.strip(),
+            "user_action_success": success.strip(),
+        },
+    )
+
+
+@app.get("/register", include_in_schema=False)
+def register_page(request: Request, error: str = Query(default=""), success: str = Query(default="")):
+    user = get_current_user(request)
+    if user is not None:
+        return RedirectResponse(url="/", status_code=303)
+    return templates.TemplateResponse(
+        request=request,
+        name="register.html",
+        context={
+            **build_common_context(request),
+            "error_message": error.strip(),
+            "success_message": success.strip(),
+        },
+    )
+
+
+@app.post("/register", include_in_schema=False)
+def register_action(
+    request: Request,
+    username: str = Form(...),
+    display_name: str = Form(default=""),
+    password: str = Form(...),
+    confirm_password: str = Form(...),
+):
+    if password != confirm_password:
+        return templates.TemplateResponse(
+            request=request,
+            name="register.html",
+            context={
+                **build_common_context(request),
+                "error_message": "两次输入的密码不一致。",
+                "success_message": "",
+            },
+            status_code=400,
+        )
+    try:
+        create_user(
+            username=username,
+            password=password,
+            display_name=display_name,
+            role="user",
+            db_path=DB_PATH,
+        )
+    except ValueError as exc:
+        return templates.TemplateResponse(
+            request=request,
+            name="register.html",
+            context={
+                **build_common_context(request),
+                "error_message": str(exc),
+                "success_message": "",
+            },
+            status_code=400,
+        )
+    return RedirectResponse(url="/register?success=注册成功，请登录。", status_code=303)
+
+
+@app.get("/account", include_in_schema=False)
+def account_page(
+    request: Request,
+    error: str = Query(default=""),
+    success: str = Query(default=""),
+    phone_code: str = Query(default=""),
+    pending_phone: str = Query(default=""),
+):
+    user = require_user(request)
+    return templates.TemplateResponse(
+        request=request,
+        name="account.html",
+        context={
+            **build_common_context(request),
+            "account_user": user,
+            "error_message": error.strip(),
+            "success_message": success.strip(),
+            "phone_code": phone_code.strip(),
+            "pending_phone": pending_phone.strip(),
+        },
+    )
+
+
+@app.post("/account/password", include_in_schema=False)
+def change_password_action(
+    request: Request,
+    current_password: str = Form(...),
+    new_password: str = Form(...),
+    confirm_password: str = Form(...),
+):
+    user = require_user(request)
+    session_token = get_current_session_token(request)
+    if new_password != confirm_password:
+        return RedirectResponse(url="/account?error=两次输入的新密码不一致。", status_code=303)
+    try:
+        change_user_password(user.id, current_password, new_password, DB_PATH)
+        revoke_user_sessions(user.id, DB_PATH)
+    except ValueError as exc:
+        return RedirectResponse(url=f"/account?error={exc}", status_code=303)
+
+    response = RedirectResponse(url="/account?success=密码已更新，其他设备已退出登录。", status_code=303)
+    response.set_cookie(
+        key=SESSION_COOKIE_NAME,
+        value=create_session(user.id, DB_PATH),
+        httponly=True,
+        samesite="lax",
+        max_age=7 * 24 * 60 * 60,
+    )
+    return response
+
+
+@app.post("/account/phone/code", include_in_schema=False)
+def send_account_phone_code_action(
+    request: Request,
+    phone_number: str = Form(...),
+):
+    user = require_user(request)
+    try:
+        code = issue_phone_verification_code(phone_number, "bind", DB_PATH, user_id=user.id)
+    except ValueError as exc:
+        return RedirectResponse(url=f"/account?error={exc}", status_code=303)
+    return RedirectResponse(
+        url=f"/account?success=验证码已生成。&phone_code={code}&pending_phone={phone_number.strip()}",
+        status_code=303,
+    )
+
+
+@app.post("/account/phone/verify", include_in_schema=False)
+def verify_account_phone_action(
+    request: Request,
+    phone_number: str = Form(...),
+    code: str = Form(...),
+):
+    user = require_user(request)
+    try:
+        bind_user_phone(user.id, phone_number, code, DB_PATH)
+    except ValueError as exc:
+        return RedirectResponse(url=f"/account?error={exc}", status_code=303)
+    return RedirectResponse(url="/account?success=手机号已验证并绑定。", status_code=303)
+
+
+@app.post("/account/logout-all", include_in_schema=False)
+def logout_all_sessions_action(request: Request):
+    user = require_user(request)
+    session_token = get_current_session_token(request)
+    revoke_user_sessions(user.id, DB_PATH)
+    with suppress(Exception):
+        delete_session(session_token, DB_PATH)
+    response = RedirectResponse(url="/login", status_code=303)
+    response.delete_cookie(SESSION_COOKIE_NAME)
+    return response
+
+
+@app.get("/forgot-password", include_in_schema=False)
+def forgot_password_page(
+    request: Request,
+    error: str = Query(default=""),
+    success: str = Query(default=""),
+    phone_code: str = Query(default=""),
+    pending_phone: str = Query(default=""),
+):
+    return templates.TemplateResponse(
+        request=request,
+        name="forgot_password.html",
+        context={
+            **build_common_context(request),
+            "error_message": error.strip(),
+            "success_message": success.strip(),
+            "phone_code": phone_code.strip(),
+            "pending_phone": pending_phone.strip(),
+        },
+    )
+
+
+@app.post("/forgot-password/code", include_in_schema=False)
+def forgot_password_code_action(
+    request: Request,
+    phone_number: str = Form(...),
+):
+    try:
+        code = issue_phone_verification_code(phone_number, "reset", DB_PATH)
+    except ValueError as exc:
+        return templates.TemplateResponse(
+            request=request,
+            name="forgot_password.html",
+            context={
+                **build_common_context(request),
+                "error_message": str(exc),
+                "success_message": "",
+                "phone_code": "",
+                "pending_phone": phone_number.strip(),
+            },
+            status_code=400,
+        )
+    return templates.TemplateResponse(
+        request=request,
+        name="forgot_password.html",
+        context={
+            **build_common_context(request),
+            "error_message": "",
+            "success_message": "验证码已生成。",
+            "phone_code": code,
+            "pending_phone": phone_number.strip(),
+        },
+    )
+
+
+@app.post("/forgot-password/reset", include_in_schema=False)
+def forgot_password_reset_action(
+    request: Request,
+    phone_number: str = Form(...),
+    code: str = Form(...),
+    new_password: str = Form(...),
+    confirm_password: str = Form(...),
+):
+    if new_password != confirm_password:
+        return templates.TemplateResponse(
+            request=request,
+            name="forgot_password.html",
+            context={
+                **build_common_context(request),
+                "error_message": "两次输入的新密码不一致。",
+                "success_message": "",
+                "phone_code": "",
+                "pending_phone": phone_number.strip(),
+            },
+            status_code=400,
+        )
+    try:
+        reset_password_by_phone(phone_number, code, new_password, DB_PATH)
+    except ValueError as exc:
+        return templates.TemplateResponse(
+            request=request,
+            name="forgot_password.html",
+            context={
+                **build_common_context(request),
+                "error_message": str(exc),
+                "success_message": "",
+                "phone_code": "",
+                "pending_phone": phone_number.strip(),
+            },
+            status_code=400,
+        )
+    return RedirectResponse(url="/login?error=密码已重置，请使用新密码登录。", status_code=303)
+
+
+@app.post("/admin/users", include_in_schema=False)
+def admin_create_user_action(
+    request: Request,
+    username: str = Form(...),
+    display_name: str = Form(default=""),
+    role: str = Form(default="user"),
+    password: str = Form(...),
+):
+    require_admin(request)
+    try:
+        create_user(
+            username=username,
+            password=password,
+            display_name=display_name,
+            role=role,
+            db_path=DB_PATH,
+        )
+    except ValueError as exc:
+        return templates.TemplateResponse(
+            request=request,
+            name="admin_dashboard.html",
+            context={
+                **build_common_context(request),
+                "dashboard": get_admin_dashboard_stats(DB_PATH),
+                "users": list_users(DB_PATH),
+                "user_create_error": str(exc),
+                "user_create_success": "",
+                "user_action_error": "",
+                "user_action_success": "",
+            },
+            status_code=400,
+        )
+    return RedirectResponse(url="/admin?success=用户已创建。", status_code=303)
+
+
+@app.post("/admin/users/{user_id}/status", include_in_schema=False)
+def admin_update_user_status_action(
+    request: Request,
+    user_id: int,
+    is_active: str = Form(...),
+):
+    require_admin(request)
+    try:
+        update_user_status(user_id, is_active == "true", DB_PATH)
+    except ValueError as exc:
+        return RedirectResponse(url=f"/admin?error={exc}", status_code=303)
+    return RedirectResponse(url="/admin?success=用户状态已更新。", status_code=303)
+
+
+@app.post("/admin/users/{user_id}/password", include_in_schema=False)
+def admin_reset_user_password_action(
+    request: Request,
+    user_id: int,
+    new_password: str = Form(...),
+):
+    require_admin(request)
+    try:
+        update_user_password(user_id, new_password, DB_PATH)
+        revoke_user_sessions(user_id, DB_PATH)
+    except ValueError as exc:
+        return RedirectResponse(url=f"/admin?error={exc}", status_code=303)
+    return RedirectResponse(url="/admin?success=密码已重置，旧会话已失效。", status_code=303)
+
+
+@app.post("/admin/users/{user_id}/logout-all", include_in_schema=False)
+def admin_logout_user_sessions_action(request: Request, user_id: int):
+    require_admin(request)
+    user = get_user_by_id(user_id, DB_PATH)
+    if user is None:
+        raise HTTPException(status_code=404, detail="用户不存在。")
+    revoke_user_sessions(user_id, DB_PATH)
+    return RedirectResponse(url="/admin?success=该用户已被强制下线。", status_code=303)
+
+
 @app.get("/", include_in_schema=False)
 def grid_page(
     request: Request,
@@ -1558,23 +1760,25 @@ def grid_page(
     node_id: Optional[int] = Query(default=None),
 ):
     """渲染素材网格页。"""
-    current_library_id = resolve_library_id(library_id)
+    current_library_id = resolve_library_id(request, library_id)
     current_node_id = resolve_node_id(current_library_id, node_id)
     clips = load_clips(
+        request,
         query=q.strip(),
         tag=tag.strip(),
         library_id=current_library_id,
         node_id=current_node_id,
     )
-    libraries = list_libraries(DB_PATH)
-    current_library = get_library_by_id(current_library_id, DB_PATH)
+    libraries = get_visible_libraries(request)
+    current_library = require_accessible_library(request, current_library_id)
     return templates.TemplateResponse(
         request=request,
         name="index.html",
         context={
+            **build_common_context(request),
             "clips": clips,
             "stats": build_stats(clips),
-            "all_tags": load_tags(current_library_id, current_node_id),
+            "all_tags": load_tags(request, current_library_id, current_node_id),
             "current_query": q.strip(),
             "current_tag": tag.strip(),
             "libraries": libraries,
@@ -1596,17 +1800,23 @@ def upload_page(request: Request, library_id: Optional[int] = Query(default=None
     return templates.TemplateResponse(
         request=request,
         name="upload.html",
-        context=build_upload_page_context(selected_library_id=library_id),
+        context=build_upload_page_context(request, selected_library_id=library_id),
     )
 
 
-def build_clip_detail_context(clip_id: int, current_library_id: int, edit_error: str | None = None) -> dict[str, Any]:
+def build_clip_detail_context(
+    request: Request,
+    clip_id: int,
+    current_library_id: int,
+    edit_error: str | None = None,
+) -> dict[str, Any]:
     """构造详情页模板上下文。"""
-    clip = load_clip_detail(clip_id)
+    clip = require_accessible_clip(request, clip_id)
     if clip is None:
         raise HTTPException(status_code=404, detail="素材不存在。")
     previous_clip_id, next_clip_id = load_adjacent_clip_ids(clip_id, current_library_id)
     return {
+        **build_common_context(request),
         "clip": clip,
         "similar_clips": load_similar_clips(clip.id, clip.scene),
         "return_url": f"/?library_id={current_library_id}",
@@ -1620,11 +1830,12 @@ def build_clip_detail_context(clip_id: int, current_library_id: int, edit_error:
 @app.get("/clips/{clip_id}", include_in_schema=False)
 def clip_detail_page(request: Request, clip_id: int, library_id: Optional[int] = Query(default=None)):
     """渲染单条素材详情页。"""
-    current_library_id = resolve_library_id(library_id)
+    clip = require_accessible_clip(request, clip_id)
+    current_library_id = resolve_library_id(request, library_id or clip.library_id)
     return templates.TemplateResponse(
         request=request,
         name="clip_detail.html",
-        context=build_clip_detail_context(clip_id, current_library_id),
+        context=build_clip_detail_context(request, clip_id, current_library_id),
     )
 
 
@@ -1641,8 +1852,8 @@ def compare_clips_page(
     if len(clip_ids) > 6:
         raise HTTPException(status_code=400, detail="一次最多对比 6 条素材。")
 
-    current_library_id = resolve_library_id(library_id)
-    payloads = load_compare_payloads(clip_ids)
+    current_library_id = resolve_library_id(request, library_id)
+    payloads = [item for item in load_compare_payloads(clip_ids) if item["clip"].library_id == current_library_id]
     if len(payloads) < 2:
         raise HTTPException(status_code=400, detail="没有足够素材可用于对比。")
     for item in payloads:
@@ -1651,6 +1862,7 @@ def compare_clips_page(
         request=request,
         name="compare.html",
         context={
+            **build_common_context(request),
             "compare_items": payloads,
             "recommended_item": payloads[0],
             "current_library_id": current_library_id,
@@ -1661,11 +1873,12 @@ def compare_clips_page(
 
 @app.post("/compare/selection", include_in_schema=False)
 def compare_clips_from_selection(
+    request: Request,
     selected_ids: list[str] = Form(default_factory=list),
     library_id: Optional[int] = Form(default=None),
 ):
     """从素材库多选进入对比页。"""
-    current_library_id = resolve_library_id(library_id)
+    current_library_id = resolve_library_id(request, library_id)
     clip_ids = parse_selected_ids(selected_ids)[:6]
     if len(clip_ids) < 2:
         raise HTTPException(status_code=400, detail="至少选择 2 条素材才能对比。")
@@ -1675,11 +1888,14 @@ def compare_clips_from_selection(
 
 @app.post("/compare/keep", include_in_schema=False)
 def keep_recommended_clip(
+    request: Request,
     keep_clip_id: int = Form(...),
     selected_ids: list[str] = Form(default_factory=list),
     library_id: int = Form(...),
 ):
     """保留推荐素材，并把其余素材移入回收站。"""
+    require_accessible_library(request, library_id)
+    require_accessible_clip(request, keep_clip_id)
     delete_targets = [clip_id for clip_id in parse_selected_ids(selected_ids) if clip_id != keep_clip_id]
     if delete_targets:
         delete_clips(delete_targets, library_id, DB_PATH)
@@ -1694,7 +1910,7 @@ def update_clip_summary_action(
     library_id: Optional[int] = Form(default=None),
 ):
     """更新单条素材的摘要。"""
-    clip = load_clip_detail(clip_id)
+    clip = require_accessible_clip(request, clip_id)
     if clip is None:
         raise HTTPException(status_code=404, detail="素材不存在。")
 
@@ -1706,15 +1922,15 @@ def update_clip_summary_action(
             db_path=DB_PATH,
         )
     except ValueError as exc:
-        current_library_id = resolve_library_id(library_id)
+        current_library_id = resolve_library_id(request, library_id)
         return templates.TemplateResponse(
             request=request,
             name="clip_detail.html",
-            context=build_clip_detail_context(clip_id, current_library_id, str(exc)),
+            context=build_clip_detail_context(request, clip_id, current_library_id, str(exc)),
             status_code=400,
         )
 
-    current_library_id = resolve_library_id(library_id)
+    current_library_id = resolve_library_id(request, library_id)
     return RedirectResponse(url=f"/clips/{clip_id}?library_id={current_library_id}", status_code=303)
 
 
@@ -1726,11 +1942,12 @@ def update_clip_card_summary_action(
     library_id: Optional[int] = Form(default=None),
 ):
     """更新素材库卡片里的摘要名称，并返回局部卡片 HTML。"""
+    clip_detail = require_accessible_clip(request, clip_id)
     clip = load_clip_card(clip_id)
     if clip is None:
         raise HTTPException(status_code=404, detail="素材不存在。")
 
-    current_library_id = resolve_library_id(library_id)
+    current_library_id = resolve_library_id(request, library_id or clip_detail.library_id)
     card_error: str | None = None
     edit_open = False
     try:
@@ -1763,13 +1980,14 @@ def update_clip_card_summary_action(
 
 @app.post("/clips/{clip_id}/move", include_in_schema=False)
 def move_clip_to_folder_action(
+    request: Request,
     clip_id: int,
     library_id: int = Form(...),
     target_node_id: int = Form(...),
     return_node_id: Optional[int] = Form(default=None),
 ):
     """把单条素材移动到指定文件夹，或移回未分类。"""
-    clip = load_clip_detail(clip_id)
+    clip = require_accessible_clip(request, clip_id)
     if clip is None:
         raise HTTPException(status_code=404, detail="素材不存在。")
     current_library_id = clip.library_id
@@ -1794,7 +2012,7 @@ def append_clip_tags_action(
     library_id: Optional[int] = Form(default=None),
 ):
     """为单条素材追加标签。"""
-    clip = load_clip_detail(clip_id)
+    clip = require_accessible_clip(request, clip_id)
     if clip is None:
         raise HTTPException(status_code=404, detail="素材不存在。")
 
@@ -1802,46 +2020,48 @@ def append_clip_tags_action(
     try:
         append_clip_tags(clip_id=clip.id, new_tags=tag_candidates, db_path=DB_PATH)
     except ValueError as exc:
-        current_library_id = resolve_library_id(library_id)
+        current_library_id = resolve_library_id(request, library_id or clip.library_id)
         return templates.TemplateResponse(
             request=request,
             name="clip_detail.html",
-            context=build_clip_detail_context(clip_id, current_library_id, str(exc)),
+            context=build_clip_detail_context(request, clip_id, current_library_id, str(exc)),
             status_code=400,
         )
 
-    current_library_id = resolve_library_id(library_id)
+    current_library_id = resolve_library_id(request, library_id or clip.library_id)
     return RedirectResponse(url=f"/clips/{clip_id}?library_id={current_library_id}", status_code=303)
 
 
 @app.post("/clips/{clip_id}/note", include_in_schema=False)
 def update_clip_note_action(
+    request: Request,
     clip_id: int,
     note: str = Form(default=""),
     library_id: Optional[int] = Form(default=None),
 ):
     """更新单条素材的用户批注。"""
-    clip = load_clip_detail(clip_id)
+    clip = require_accessible_clip(request, clip_id)
     if clip is None:
         raise HTTPException(status_code=404, detail="素材不存在。")
 
     update_clip_note(clip_id=clip.id, note=note, db_path=DB_PATH)
 
-    current_library_id = resolve_library_id(library_id)
+    current_library_id = resolve_library_id(request, library_id or clip.library_id)
     return RedirectResponse(url=f"/clips/{clip_id}?library_id={current_library_id}", status_code=303)
 
 
 @app.post("/clips/{clip_id}/delete", include_in_schema=False)
 def delete_single_clip(
+    request: Request,
     clip_id: int,
     library_id: Optional[int] = Form(default=None),
 ):
     """删除当前素材，并跳转到相邻详情页或素材库。"""
-    clip = load_clip_detail(clip_id)
+    clip = require_accessible_clip(request, clip_id)
     if clip is None:
         raise HTTPException(status_code=404, detail="素材不存在。")
 
-    current_library_id = resolve_library_id(library_id or clip.library_id)
+    current_library_id = resolve_library_id(request, library_id or clip.library_id)
     previous_clip_id, next_clip_id = load_adjacent_clip_ids(clip_id, current_library_id)
     delete_clips([clip_id], current_library_id, DB_PATH)
 
@@ -1856,11 +2076,13 @@ def delete_single_clip(
 
 @app.post("/projects/nodes", include_in_schema=False)
 def create_project_node_action(
+    request: Request,
     library_id: int = Form(...),
     name: str = Form(...),
     parent_id: Optional[int] = Form(default=None),
 ):
     """在项目内创建文件夹。"""
+    require_accessible_library(request, library_id)
     create_project_node(library_id=library_id, name=name, parent_id=parent_id, db_path=DB_PATH)
     target_url = f"/?library_id={library_id}"
     if parent_id is not None:
@@ -1870,32 +2092,38 @@ def create_project_node_action(
 
 @app.post("/projects/nodes/{node_id}/rename", include_in_schema=False)
 def rename_project_node_action(
+    request: Request,
     node_id: int,
     library_id: int = Form(...),
     new_name: str = Form(...),
 ):
     """重命名项目节点。"""
+    require_accessible_library(request, library_id)
     rename_project_node(node_id=node_id, library_id=library_id, new_name=new_name, db_path=DB_PATH)
     return RedirectResponse(url=f"/?library_id={library_id}&node_id={node_id}", status_code=303)
 
 
 @app.post("/projects/nodes/{node_id}/move", include_in_schema=False)
 def move_project_node_action(
+    request: Request,
     node_id: int,
     library_id: int = Form(...),
     target_parent_id: Optional[int] = Form(default=None),
 ):
     """移动项目节点。"""
+    require_accessible_library(request, library_id)
     move_project_node(node_id=node_id, library_id=library_id, target_parent_id=target_parent_id, db_path=DB_PATH)
     return RedirectResponse(url=f"/?library_id={library_id}&node_id={node_id}", status_code=303)
 
 
 @app.post("/projects/nodes/{node_id}/delete", include_in_schema=False)
 def delete_project_node_action(
+    request: Request,
     node_id: int,
     library_id: int = Form(...),
 ):
     """删除项目节点。"""
+    require_accessible_library(request, library_id)
     node = get_project_node(node_id, DB_PATH)
     if node is None:
         raise HTTPException(status_code=404, detail="文件夹不存在。")
@@ -1909,11 +2137,13 @@ def delete_project_node_action(
 
 @app.post("/projects/nodes/attach", include_in_schema=False)
 def attach_clips_to_node_action(
+    request: Request,
     library_id: int = Form(...),
     target_node_id: int = Form(...),
     selected_ids: list[str] = Form(default_factory=list),
 ):
     """把选中的素材引用到指定项目节点。"""
+    require_accessible_library(request, library_id)
     for clip_id in parse_selected_ids(selected_ids):
         attach_clip_to_node(clip_id=clip_id, node_id=target_node_id, db_path=DB_PATH)
     return RedirectResponse(url=f"/?library_id={library_id}&node_id={target_node_id}", status_code=303)
@@ -1925,12 +2155,13 @@ def recycle_page(
     library_id: Optional[int] = Query(default=None),
 ):
     """渲染项目回收站页面。"""
-    current_library_id = resolve_library_id(library_id)
-    current_library = get_library_by_id(current_library_id, DB_PATH)
+    current_library_id = resolve_library_id(request, library_id)
+    current_library = require_accessible_library(request, current_library_id)
     return templates.TemplateResponse(
         request=request,
         name="recycle.html",
         context={
+            **build_common_context(request),
             "current_library_id": current_library_id,
             "current_library": current_library,
             "recycle_items": list_recycled_clips(current_library_id, DB_PATH),
@@ -1941,10 +2172,12 @@ def recycle_page(
 
 @app.post("/recycle/restore", include_in_schema=False)
 def restore_recycled_clips_action(
+    request: Request,
     library_id: int = Form(...),
     selected_ids: list[str] = Form(default_factory=list),
 ):
     """从项目回收站恢复素材。"""
+    require_accessible_library(request, library_id)
     restore_recycled_clips(library_id, parse_selected_ids(selected_ids), DB_PATH)
     return RedirectResponse(url=f"/?library_id={library_id}", status_code=303)
 
@@ -1952,7 +2185,7 @@ def restore_recycled_clips_action(
 @app.get("/clips/{clip_id}/transcript", include_in_schema=False)
 def clip_transcript_partial(request: Request, clip_id: int):
     """返回详情页 transcript 局部 HTML。"""
-    clip = load_clip_detail(clip_id)
+    clip = require_accessible_clip(request, clip_id)
     if clip is None:
         raise HTTPException(status_code=404, detail="素材不存在。")
     return templates.TemplateResponse(
@@ -1965,7 +2198,7 @@ def clip_transcript_partial(request: Request, clip_id: int):
 @app.post("/clips/{clip_id}/transcript/run", include_in_schema=False)
 def run_clip_transcript(request: Request, clip_id: int):
     """手动触发单条素材的口播识别。"""
-    clip = load_clip_detail(clip_id)
+    clip = require_accessible_clip(request, clip_id)
     if clip is None:
         raise HTTPException(status_code=404, detail="素材不存在。")
 
@@ -2012,9 +2245,9 @@ def run_clip_transcript(request: Request, clip_id: int):
 
 
 @app.get("/media/{clip_id}", include_in_schema=False)
-def clip_media(clip_id: int):
+def clip_media(request: Request, clip_id: int):
     """按素材 ID 返回原始视频文件，供详情页播放。"""
-    clip = load_clip_detail(clip_id)
+    clip = require_accessible_clip(request, clip_id)
     if clip is None:
         raise HTTPException(status_code=404, detail="素材不存在。")
 
@@ -2035,9 +2268,9 @@ def clips_partial(
     node_id: Optional[int] = Query(default=None),
 ):
     """返回素材网格局部 HTML，供 HTMX 刷新。"""
-    current_library_id = resolve_library_id(library_id)
+    current_library_id = resolve_library_id(request, library_id)
     current_node_id = resolve_node_id(current_library_id, node_id)
-    clips = load_clips(query=q.strip(), tag=tag.strip(), library_id=current_library_id, node_id=current_node_id)
+    clips = load_clips(request, query=q.strip(), tag=tag.strip(), library_id=current_library_id, node_id=current_node_id)
     return templates.TemplateResponse(
         request=request,
         name="partials/clip_grid.html",
@@ -2063,7 +2296,7 @@ def create_upload_job(
 ):
     """接收本地上传的视频并启动后台处理。"""
     try:
-        library = resolve_upload_library(library_id, new_library_name)
+        library = resolve_upload_library(request, library_id, new_library_name)
         saved_paths = save_uploaded_files(files)
         upload_job = start_upload_job(saved_paths, library)
         return templates.TemplateResponse(
@@ -2080,6 +2313,7 @@ def create_upload_job(
             request=request,
             name="partials/upload_panel.html",
             context=build_upload_page_context(
+                request,
                 error_message=exc.detail,
                 selected_library_id=library_id,
                 pending_library_name=new_library_name,
@@ -2117,9 +2351,9 @@ def export_selected_clips(
 ):
     """导出选中的视频到 data/picks/。"""
     export_result = export_clips_by_ids(parse_selected_ids(selected_ids), destination_input=export_dir)
-    current_library_id = resolve_library_id(library_id)
+    current_library_id = resolve_library_id(request, library_id)
     current_node_id = resolve_node_id(current_library_id, node_id)
-    clips = load_clips(query=q.strip(), tag=tag.strip(), library_id=current_library_id, node_id=current_node_id)
+    clips = load_clips(request, query=q.strip(), tag=tag.strip(), library_id=current_library_id, node_id=current_node_id)
     return templates.TemplateResponse(
         request=request,
         name="partials/export_panel.html",
@@ -2137,20 +2371,23 @@ def export_selected_clips(
 
 @app.post("/libraries/{library_id}/rename", include_in_schema=False)
 def rename_library_action(
+    request: Request,
     library_id: int,
     new_name: str = Form(...),
 ):
     """重命名素材库。"""
+    require_accessible_library(request, library_id)
     try:
         rename_library(library_id, new_name, DB_PATH)
-    except (ValueError, sqlite3.IntegrityError) as exc:
+    except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return RedirectResponse(url=f"/?library_id={library_id}", status_code=303)
 
 
 @app.post("/libraries/{library_id}/delete", include_in_schema=False)
-def delete_library_action(library_id: int):
+def delete_library_action(request: Request, library_id: int):
     """删除空素材库。"""
+    require_accessible_library(request, library_id)
     try:
         delete_library(library_id, DB_PATH)
     except ValueError as exc:
@@ -2160,11 +2397,13 @@ def delete_library_action(library_id: int):
 
 @app.post("/clips/delete", include_in_schema=False)
 def delete_selected_clips(
+    request: Request,
     library_id: int = Form(...),
     selected_ids: list[str] = Form(default_factory=list),
     node_id: Optional[int] = Form(default=None),
 ):
     """批量删除当前素材库中的素材。"""
+    require_accessible_library(request, library_id)
     delete_clips(parse_selected_ids(selected_ids), library_id, DB_PATH)
     target_url = f"/?library_id={library_id}"
     if node_id is not None:

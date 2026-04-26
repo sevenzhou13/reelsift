@@ -1,0 +1,78 @@
+{% extends "base.html" %}
+{% block content %}
+<main class="mx-auto flex min-h-[calc(100vh-1px)] max-w-6xl items-center px-4 py-10 sm:px-6 lg:px-8">
+  <section class="grid w-full gap-8 lg:grid-cols-[1.1fr_0.9fr]">
+    <div class="rounded-[28px] border border-white/10 bg-[radial-gradient(circle_at_top_left,_rgba(163,230,53,0.18),_transparent_38%),linear-gradient(135deg,_rgba(18,18,20,0.96),_rgba(10,10,12,0.92))] p-8 sm:p-10">
+      <p class="text-xs uppercase tracking-[0.28em] text-lime-300">Reelsift Access</p>
+      <h1 class="mt-4 text-4xl font-semibold tracking-tight text-white">{{ login_title }}</h1>
+      <p class="mt-4 max-w-xl text-sm leading-7 text-gray-300">
+        {% if admin_only %}
+        管理员入口用于查看平台资源、用户使用情况和整体素材规模。请使用管理员账号登录。
+        {% else %}
+        用户登录后会只看到自己的素材库和数据，便于后续把平台扩展到多用户使用。
+        {% endif %}
+      </p>
+      <div class="mt-8 grid gap-4 sm:grid-cols-2">
+        <div class="rounded-2xl border border-white/10 bg-black/20 p-4">
+          <p class="text-xs uppercase tracking-[0.2em] text-gray-500">默认用户</p>
+          <p class="mt-3 text-sm text-white">账号：`demo`</p>
+          <p class="mt-1 text-sm text-gray-300">密码：`demo123`</p>
+        </div>
+        <div class="rounded-2xl border border-white/10 bg-black/20 p-4">
+          <p class="text-xs uppercase tracking-[0.2em] text-gray-500">默认管理员</p>
+          <p class="mt-3 text-sm text-white">账号：`admin`</p>
+          <p class="mt-1 text-sm text-gray-300">密码：`admin123`</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="rounded-[28px] border border-white/10 bg-[#111214] p-8 shadow-2xl shadow-black/30 sm:p-10">
+      <form action="{{ login_action }}" method="post" class="space-y-5">
+        <input type="hidden" name="next_url" value="{{ next_url }}">
+        <div>
+          <label for="username" class="mb-2 block text-sm text-gray-300">用户名</label>
+          <input
+            id="username"
+            name="username"
+            type="text"
+            required
+            autocomplete="username"
+            class="w-full rounded-2xl border border-white/10 bg-black/30 px-4 py-3 text-white outline-none transition focus:border-lime-300"
+          >
+        </div>
+        <div>
+          <label for="password" class="mb-2 block text-sm text-gray-300">密码</label>
+          <input
+            id="password"
+            name="password"
+            type="password"
+            required
+            autocomplete="current-password"
+            class="w-full rounded-2xl border border-white/10 bg-black/30 px-4 py-3 text-white outline-none transition focus:border-lime-300"
+          >
+        </div>
+
+        {% if error_message %}
+        <div class="rounded-2xl border border-red-400/30 bg-red-400/10 px-4 py-3 text-sm text-red-200">
+          {{ error_message }}
+        </div>
+        {% endif %}
+
+        <button
+          type="submit"
+          class="w-full rounded-2xl bg-lime-300 px-4 py-3 text-sm font-semibold text-black transition hover:bg-lime-200"
+        >
+          {{ login_title }}
+        </button>
+      </form>
+
+      <div class="mt-6 flex items-center justify-between text-sm text-gray-400">
+        <a href="/register" class="transition hover:text-white">注册新用户</a>
+        <a href="/forgot-password" class="transition hover:text-white">忘记密码</a>
+        <a href="/login" class="transition hover:text-white">用户入口</a>
+        <a href="/admin/login" class="transition hover:text-white">管理员入口</a>
+      </div>
+    </div>
+  </section>
+</main>
+{% endblock %}

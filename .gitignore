@@ -2,6 +2,7 @@
 data/
 test-video/
 .venv/
+.vendor/
 __pycache__/
 *.pyc
 *.pyo

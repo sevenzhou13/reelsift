@@ -1,0 +1,128 @@
+{% extends "base.html" %}
+{% block content %}
+<main class="mx-auto max-w-5xl px-4 py-8 sm:px-6 lg:px-8">
+  <section class="mb-8">
+    <p class="text-xs uppercase tracking-[0.26em] text-sky-300">Account Center</p>
+    <h1 class="mt-3 text-3xl font-semibold tracking-tight text-white">账户与安全</h1>
+    <p class="mt-3 max-w-3xl text-sm leading-7 text-gray-300">
+      这里可以修改密码，并主动让其他设备退出登录。默认测试账号建议你在第一次使用后尽快改密。
+    </p>
+  </section>
+
+  <section class="grid gap-6 lg:grid-cols-[0.9fr_1.1fr]">
+    <article class="rounded-[28px] border border-white/10 bg-[#121316] p-6">
+      <p class="text-xs uppercase tracking-[0.18em] text-gray-500">当前账户</p>
+      <h2 class="mt-4 text-2xl font-semibold text-white">{{ account_user.display_name or account_user.username }}</h2>
+      <p class="mt-2 text-sm text-gray-400">@{{ account_user.username }}</p>
+      <p class="mt-2 text-sm text-gray-400">角色：{{ "管理员" if account_user.role == "admin" else "用户" }}</p>
+
+      {% if is_default_account %}
+      <div class="mt-5 rounded-2xl border border-amber-400/30 bg-amber-400/10 px-4 py-3 text-sm text-amber-200">
+        这是默认测试账号，建议现在就修改密码，避免后续多人共用时混淆。
+      </div>
+      {% endif %}
+
+      <form action="/account/logout-all" method="post" class="mt-6">
+        <button type="submit" class="rounded-2xl border border-red-400/30 bg-red-400/10 px-4 py-3 text-sm text-red-200 transition hover:border-red-300/40 hover:bg-red-400/15">
+          退出所有设备登录
+        </button>
+      </form>
+    </article>
+
+    <article class="rounded-[28px] border border-white/10 bg-[#121316] p-6">
+      <h2 class="text-xl font-semibold text-white">修改密码</h2>
+      <p class="mt-2 text-sm text-gray-400">修改成功后，旧会话会失效，你会在当前浏览器保留新的登录状态。</p>
+
+      <form action="/account/password" method="post" class="mt-6 space-y-4">
+        <div>
+          <label for="current_password" class="mb-2 block text-sm text-gray-300">当前密码</label>
+          <input id="current_password" name="current_password" type="password" required class="w-full rounded-2xl border border-white/10 bg-black/30 px-4 py-3 text-white outline-none transition focus:border-sky-300">
+        </div>
+        <div>
+          <label for="new_password" class="mb-2 block text-sm text-gray-300">新密码</label>
+          <input id="new_password" name="new_password" type="password" required class="w-full rounded-2xl border border-white/10 bg-black/30 px-4 py-3 text-white outline-none transition focus:border-sky-300">
+        </div>
+        <div>
+          <label for="confirm_password" class="mb-2 block text-sm text-gray-300">确认新密码</label>
+          <input id="confirm_password" name="confirm_password" type="password" required class="w-full rounded-2xl border border-white/10 bg-black/30 px-4 py-3 text-white outline-none transition focus:border-sky-300">
+        </div>
+
+        {% if error_message %}
+        <div class="rounded-2xl border border-red-400/30 bg-red-400/10 px-4 py-3 text-sm text-red-200">
+          {{ error_message }}
+        </div>
+        {% endif %}
+
+        {% if success_message %}
+        <div class="rounded-2xl border border-emerald-400/30 bg-emerald-400/10 px-4 py-3 text-sm text-emerald-200">
+          {{ success_message }}
+        </div>
+        {% endif %}
+
+        <button type="submit" class="rounded-2xl bg-sky-300 px-5 py-3 text-sm font-semibold text-black transition hover:bg-sky-200">
+          更新密码
+        </button>
+      </form>
+    </article>
+  </section>
+
+  <section class="mt-6 rounded-[28px] border border-white/10 bg-[#121316] p-6">
+    <div class="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+      <div>
+        <h2 class="text-xl font-semibold text-white">手机号验证</h2>
+        <p class="mt-2 text-sm text-gray-400">绑定并验证手机号后，可以在忘记密码时用手机号找回。</p>
+      </div>
+      <div class="rounded-2xl border border-white/10 px-4 py-3 text-sm text-gray-300">
+        {% if account_user.phone_number and account_user.phone_verified_at %}
+        已验证：{{ account_user.phone_number }}
+        {% else %}
+        尚未验证手机号
+        {% endif %}
+      </div>
+    </div>
+
+    <div class="mt-6 grid gap-5 lg:grid-cols-2">
+      <form action="/account/phone/code" method="post" class="space-y-4">
+        <div>
+          <label for="phone_number" class="mb-2 block text-sm text-gray-300">手机号</label>
+          <input
+            id="phone_number"
+            name="phone_number"
+            type="tel"
+            value="{{ pending_phone or account_user.phone_number or '' }}"
+            required
+            class="w-full rounded-2xl border border-white/10 bg-black/30 px-4 py-3 text-white outline-none transition focus:border-sky-300"
+          >
+        </div>
+        <button type="submit" class="rounded-2xl border border-sky-300/30 bg-sky-300/10 px-5 py-3 text-sm font-semibold text-sky-100 transition hover:border-sky-200/50">
+          获取验证码
+        </button>
+      </form>
+
+      <form action="/account/phone/verify" method="post" class="space-y-4">
+        <input type="hidden" name="phone_number" value="{{ pending_phone or account_user.phone_number or '' }}">
+        <div>
+          <label for="code" class="mb-2 block text-sm text-gray-300">验证码</label>
+          <input
+            id="code"
+            name="code"
+            type="text"
+            inputmode="numeric"
+            required
+            class="w-full rounded-2xl border border-white/10 bg-black/30 px-4 py-3 text-white outline-none transition focus:border-sky-300"
+          >
+        </div>
+        <button type="submit" class="rounded-2xl bg-sky-300 px-5 py-3 text-sm font-semibold text-black transition hover:bg-sky-200">
+          验证并绑定
+        </button>
+      </form>
+    </div>
+
+    {% if phone_code %}
+    <div class="mt-5 rounded-2xl border border-amber-400/30 bg-amber-400/10 px-4 py-3 text-sm text-amber-100">
+      本地测试验证码：<span class="font-semibold tracking-[0.18em]">{{ phone_code }}</span>
+    </div>
+    {% endif %}
+  </section>
+</main>
+{% endblock %}

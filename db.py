@@ -1,13 +1,55 @@
-# SQLite 读写：初始化 schema，并负责 clip 结果存取
-
 from __future__ import annotations
 
 import json
-import sqlite3
+import os
+import base64
+import hashlib
+import hmac
+import re
+import secrets
+import sys
 import threading
 import time
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
+
+BASE_DIR = Path(__file__).parent
+VENDOR_DIR = BASE_DIR / ".vendor"
+if VENDOR_DIR.exists():
+    sys.path.insert(0, str(VENDOR_DIR))
+
+from dotenv import load_dotenv
+from sqlalchemy import (
+    Column,
+    JSON,
+    Boolean,
+    DateTime,
+    Float,
+    ForeignKey,
+    Integer,
+    MetaData,
+    String,
+    Table,
+    Text,
+    UniqueConstraint,
+    and_,
+    create_engine,
+    delete,
+    event,
+    exists,
+    func,
+    insert,
+    literal,
+    or_,
+    select,
+    text,
+    update,
+)
+from sqlalchemy.engine import Connection, Engine, RowMapping
+from sqlalchemy.exc import IntegrityError, OperationalError
+from sqlalchemy.orm import sessionmaker
 
 
 @dataclass
@@ -15,6 +57,7 @@ class LibraryRecord:
     id: int
     name: str
     clip_count: int = 0
+    owner_user_id: int | None = None
 
 
 @dataclass
@@ -74,65 +117,263 @@ class ClipRecord:
     user_note: str | None = None
 
 
-_DB_PATH = Path(__file__).parent / "data" / "reelsift.db"
-_CONNECTION: sqlite3.Connection | None = None
-_DB_LOCK = threading.RLock()
+@dataclass
+class UserRecord:
+    id: int
+    username: str
+    role: str
+    display_name: str
+    is_active: bool = True
+    phone_number: str | None = None
+    phone_verified_at: datetime | None = None
+
+
+@dataclass
+class UserUsageRecord:
+    user: UserRecord
+    library_count: int
+    clip_count: int
+    recycled_clip_count: int
+    total_storage_bytes: int
+    active_session_count: int
+
+
 DEFAULT_LIBRARY_NAME = "默认素材库"
 ROOT_NODE_NAME = "全部素材"
+_DB_PATH = BASE_DIR / "data" / "reelsift.db"
+_DB_LOCK = threading.RLock()
+_ENGINE: Engine | None = None
+_SESSION_FACTORY: sessionmaker | None = None
+_ENGINE_KEY: str | None = None
+
+load_dotenv(override=True)
+
+metadata = MetaData()
+
+users = Table(
+    "users",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("username", String(100), nullable=False, unique=True),
+    Column("password_hash", String(512), nullable=False),
+    Column("role", String(20), nullable=False),
+    Column("display_name", String(255), nullable=False),
+    Column("is_active", Boolean, nullable=False, default=True),
+    Column("phone_number", String(32), nullable=True, unique=True),
+    Column("phone_verified_at", DateTime, nullable=True),
+    Column("created_at", DateTime, nullable=False),
+    Column("updated_at", DateTime, nullable=False),
+)
+
+user_sessions = Table(
+    "user_sessions",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("user_id", Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False),
+    Column("session_token", String(255), nullable=False, unique=True),
+    Column("expires_at", DateTime, nullable=False),
+    Column("created_at", DateTime, nullable=False),
+)
+
+phone_verification_codes = Table(
+    "phone_verification_codes",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("phone_number", String(32), nullable=False),
+    Column("purpose", String(32), nullable=False),
+    Column("user_id", Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=True),
+    Column("code_hash", String(512), nullable=False),
+    Column("expires_at", DateTime, nullable=False),
+    Column("consumed_at", DateTime, nullable=True),
+    Column("created_at", DateTime, nullable=False),
+)
+
+libraries = Table(
+    "libraries",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("name", String(255), nullable=False, unique=True),
+    Column("owner_user_id", Integer, ForeignKey("users.id", ondelete="SET NULL")),
+    Column("created_at", DateTime, nullable=False),
+)
+
+clips = Table(
+    "clips",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("video_hash", String(255), nullable=False, unique=True),
+    Column("library_id", Integer, ForeignKey("libraries.id"), nullable=False, default=1),
+    Column("filename", String(1024), nullable=False),
+    Column("filepath", Text, nullable=False),
+    Column("summary", Text),
+    Column("scene", Text),
+    Column("subjects_json", JSON, nullable=False, default=list),
+    Column("actions_json", JSON, nullable=False, default=list),
+    Column("has_motion", Boolean),
+    Column("sharpness_score", Float),
+    Column("cover_path", Text),
+    Column("status", String(32), nullable=False, default="pending"),
+    Column("error_message", Text),
+    Column("transcript_status", String(32), nullable=False, default="pending"),
+    Column("transcript_error_message", Text),
+    Column("preview_status", String(32), nullable=False, default="pending"),
+    Column("preview_path", Text),
+    Column("preview_error_message", Text),
+    Column("comparison_status", String(32), nullable=False, default="pending"),
+    Column("comparison_scores_json", Text),
+    Column("comparison_error_message", Text),
+    Column("user_note", Text),
+    Column("created_at", DateTime, nullable=False),
+    Column("updated_at", DateTime, nullable=False),
+)
+
+clip_tags = Table(
+    "clip_tags",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("clip_id", Integer, ForeignKey("clips.id", ondelete="CASCADE"), nullable=False),
+    Column("tag", String(255), nullable=False),
+    UniqueConstraint("clip_id", "tag", name="uq_clip_tags_clip_id_tag"),
+)
+
+transcripts = Table(
+    "transcripts",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("clip_id", Integer, ForeignKey("clips.id", ondelete="CASCADE"), nullable=False),
+    Column("start_ms", Integer, nullable=False),
+    Column("end_ms", Integer, nullable=False),
+    Column("text", Text, nullable=False),
+    Column("segment_index", Integer, nullable=False),
+)
+
+project_nodes = Table(
+    "project_nodes",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("library_id", Integer, ForeignKey("libraries.id", ondelete="CASCADE"), nullable=False),
+    Column("parent_id", Integer, ForeignKey("project_nodes.id", ondelete="CASCADE")),
+    Column("name", String(255), nullable=False),
+    Column("created_at", DateTime, nullable=False),
+    UniqueConstraint("library_id", "parent_id", "name", name="uq_project_nodes_library_parent_name"),
+)
+
+clip_node_refs = Table(
+    "clip_node_refs",
+    metadata,
+    Column("clip_id", Integer, ForeignKey("clips.id", ondelete="CASCADE"), nullable=False),
+    Column("node_id", Integer, ForeignKey("project_nodes.id", ondelete="CASCADE"), nullable=False),
+    Column("created_at", DateTime, nullable=False),
+    UniqueConstraint("clip_id", "node_id", name="uq_clip_node_refs_clip_id_node_id"),
+)
+
+recycled_clips = Table(
+    "recycled_clips",
+    metadata,
+    Column("clip_id", Integer, ForeignKey("clips.id", ondelete="CASCADE"), primary_key=True),
+    Column("library_id", Integer, ForeignKey("libraries.id", ondelete="CASCADE"), nullable=False),
+    Column("deleted_node_ids_json", JSON, nullable=False, default=list),
+    Column("deleted_at", DateTime, nullable=False),
+    Column("expires_at", DateTime, nullable=False),
+)
 
 
-def _normalize_project_roots_locked(conn: sqlite3.Connection) -> None:
-    """清理重复根节点，并确保每个素材库只有一个根节点。"""
-    library_rows = conn.execute("SELECT id FROM libraries ORDER BY id ASC").fetchall()
-    for library_row in library_rows:
-        library_id = int(library_row["id"])
-        root_rows = conn.execute(
-            """
-            SELECT id
-            FROM project_nodes
-            WHERE library_id = ? AND parent_id IS NULL
-            ORDER BY id ASC
-            """,
-            (library_id,),
-        ).fetchall()
-
-        if not root_rows:
-            conn.execute(
-                "INSERT INTO project_nodes (library_id, parent_id, name) VALUES (?, NULL, ?)",
-                (library_id, ROOT_NODE_NAME),
-            )
-            continue
-
-        keeper_id = int(root_rows[0]["id"])
-        conn.execute("UPDATE project_nodes SET name = ? WHERE id = ?", (ROOT_NODE_NAME, keeper_id))
-
-        for duplicate_row in root_rows[1:]:
-            duplicate_id = int(duplicate_row["id"])
-            conn.execute(
-                "UPDATE project_nodes SET parent_id = ? WHERE parent_id = ?",
-                (keeper_id, duplicate_id),
-            )
-            conn.execute(
-                """
-                INSERT OR IGNORE INTO clip_node_refs (clip_id, node_id)
-                SELECT clip_id, ?
-                FROM clip_node_refs
-                WHERE node_id = ?
-                """,
-                (keeper_id, duplicate_id),
-            )
-            conn.execute("DELETE FROM clip_node_refs WHERE node_id = ?", (duplicate_id,))
-            conn.execute("DELETE FROM project_nodes WHERE id = ?", (duplicate_id,))
+def _utcnow() -> datetime:
+    return datetime.now(UTC).replace(tzinfo=None)
 
 
-def _with_locked_retry(action, *, attempts: int = 6, sleep_seconds: float = 0.25):
-    """遇到 database is locked 时做有限重试。"""
-    last_error: sqlite3.OperationalError | None = None
+def _hash_password(password: str, *, salt: str | None = None) -> str:
+    resolved_salt = salt or base64.urlsafe_b64encode(secrets.token_bytes(16)).decode("ascii")
+    derived = hashlib.pbkdf2_hmac(
+        "sha256",
+        password.encode("utf-8"),
+        resolved_salt.encode("utf-8"),
+        120_000,
+    )
+    digest = base64.urlsafe_b64encode(derived).decode("ascii")
+    return f"pbkdf2_sha256${resolved_salt}${digest}"
+
+
+def _verify_password(password: str, password_hash: str) -> bool:
+    try:
+        algorithm, salt, digest = password_hash.split("$", 2)
+    except ValueError:
+        return False
+    if algorithm != "pbkdf2_sha256":
+        return False
+    recalculated = _hash_password(password, salt=salt)
+    return hmac.compare_digest(recalculated, password_hash)
+
+
+def _normalize_phone_number(phone_number: str) -> str:
+    cleaned = re.sub(r"\D+", "", phone_number.strip())
+    if len(cleaned) == 11 and cleaned.startswith("1"):
+        return cleaned
+    raise ValueError("请输入有效的 11 位手机号。")
+
+
+def _serialize_db_path(db_path: Path) -> str:
+    return str(db_path.resolve())
+
+
+def get_database_url(db_path: Path = _DB_PATH) -> str:
+    configured = os.environ.get("DATABASE_URL", "").strip()
+    if configured:
+        return configured
+    return f"sqlite:///{_serialize_db_path(db_path)}"
+
+
+def _is_sqlite_url(database_url: str) -> bool:
+    return database_url.startswith("sqlite")
+
+
+def _create_engine(database_url: str) -> Engine:
+    connect_args: dict[str, Any] = {}
+    if _is_sqlite_url(database_url):
+        connect_args["check_same_thread"] = False
+
+    engine = create_engine(
+        database_url,
+        future=True,
+        pool_pre_ping=True,
+        connect_args=connect_args,
+    )
+
+    if engine.dialect.name == "sqlite":
+        @event.listens_for(engine, "connect")
+        def _configure_sqlite(dbapi_connection, _connection_record) -> None:
+            cursor = dbapi_connection.cursor()
+            cursor.execute("PRAGMA foreign_keys = ON")
+            cursor.execute("PRAGMA busy_timeout = 10000")
+            try:
+                cursor.execute("PRAGMA journal_mode = WAL")
+                cursor.execute("PRAGMA synchronous = NORMAL")
+            except Exception:
+                pass
+            cursor.close()
+
+    return engine
+
+
+def get_engine(db_path: Path = _DB_PATH) -> Engine:
+    global _ENGINE, _SESSION_FACTORY, _ENGINE_KEY
+
+    database_url = get_database_url(db_path)
+    if _ENGINE is None or _ENGINE_KEY != database_url:
+        _ENGINE = _create_engine(database_url)
+        _SESSION_FACTORY = sessionmaker(bind=_ENGINE, future=True, expire_on_commit=False)
+        _ENGINE_KEY = database_url
+    return _ENGINE
+
+
+def _with_retry(action, *, attempts: int = 6, sleep_seconds: float = 0.25):
+    last_error: OperationalError | None = None
     for index in range(attempts):
         try:
             return action()
-        except sqlite3.OperationalError as exc:
-            if "database is locked" not in str(exc).lower():
+        except OperationalError as exc:
+            message = str(exc).lower()
+            if "database is locked" not in message and "deadlock" not in message:
                 raise
             last_error = exc
             if index == attempts - 1:
@@ -143,336 +384,513 @@ def _with_locked_retry(action, *, attempts: int = 6, sleep_seconds: float = 0.25
     raise RuntimeError("数据库重试失败，但没有捕获到明确异常。")
 
 
-def get_connection(db_path: Path = _DB_PATH) -> sqlite3.Connection:
-    """返回全局 SQLite 连接，避免每次查询重复打开。"""
-    global _CONNECTION
+def _table_exists(conn: Connection, table_name: str) -> bool:
+    if conn.engine.dialect.name == "postgresql":
+        return (
+            conn.execute(
+                text(
+                    "SELECT 1 FROM information_schema.tables "
+                    "WHERE table_schema = current_schema() AND table_name = :table_name"
+                ),
+                {"table_name": table_name},
+            ).first()
+            is not None
+        )
+    return (
+        conn.execute(
+            text("SELECT name FROM sqlite_master WHERE type='table' AND name = :table_name"),
+            {"table_name": table_name},
+        ).first()
+        is not None
+    )
 
-    if _CONNECTION is None:
-        db_path.parent.mkdir(parents=True, exist_ok=True)
-        _CONNECTION = sqlite3.connect(db_path, check_same_thread=False, timeout=10.0)
-        _CONNECTION.row_factory = sqlite3.Row
-        _CONNECTION.execute("PRAGMA busy_timeout = 10000;")
-        _CONNECTION.execute("PRAGMA foreign_keys = ON;")
-        try:
-            _CONNECTION.execute("PRAGMA journal_mode=WAL;")
-            _CONNECTION.execute("PRAGMA synchronous=NORMAL;")
-        except sqlite3.OperationalError:
-            # 如果当前已有别的连接占用数据库，先退回默认模式，避免启动直接失败。
-            pass
-    return _CONNECTION
+
+def _column_names(conn: Connection, table_name: str) -> set[str]:
+    if conn.engine.dialect.name == "postgresql":
+        rows = conn.execute(
+            text(
+                """
+                SELECT column_name
+                FROM information_schema.columns
+                WHERE table_schema = current_schema() AND table_name = :table_name
+                """
+            ),
+            {"table_name": table_name},
+        ).mappings()
+        return {row["column_name"] for row in rows}
+
+    rows = conn.execute(text(f"PRAGMA table_info({table_name})")).mappings()
+    return {row["name"] for row in rows}
 
 
-def _purge_expired_recycled_clips_locked(conn: sqlite3.Connection) -> None:
-    """清理超过保留期的回收站素材。"""
+def _ensure_legacy_columns(conn: Connection) -> None:
+    if _table_exists(conn, "users"):
+        user_columns = _column_names(conn, "users")
+        if "phone_number" not in user_columns:
+            conn.execute(text("ALTER TABLE users ADD COLUMN phone_number TEXT"))
+        if "phone_verified_at" not in user_columns:
+            conn.execute(text("ALTER TABLE users ADD COLUMN phone_verified_at DATETIME"))
+
+    if not _table_exists(conn, "clips"):
+        return
+
+    existing = _column_names(conn, "clips")
+    statements = {
+        "library_id": "ALTER TABLE clips ADD COLUMN library_id INTEGER NOT NULL DEFAULT 1",
+        "transcript_status": "ALTER TABLE clips ADD COLUMN transcript_status TEXT NOT NULL DEFAULT 'pending'",
+        "transcript_error_message": "ALTER TABLE clips ADD COLUMN transcript_error_message TEXT",
+        "preview_status": "ALTER TABLE clips ADD COLUMN preview_status TEXT NOT NULL DEFAULT 'pending'",
+        "preview_path": "ALTER TABLE clips ADD COLUMN preview_path TEXT",
+        "preview_error_message": "ALTER TABLE clips ADD COLUMN preview_error_message TEXT",
+        "comparison_status": "ALTER TABLE clips ADD COLUMN comparison_status TEXT NOT NULL DEFAULT 'pending'",
+        "comparison_scores_json": "ALTER TABLE clips ADD COLUMN comparison_scores_json TEXT",
+        "comparison_error_message": "ALTER TABLE clips ADD COLUMN comparison_error_message TEXT",
+        "user_note": "ALTER TABLE clips ADD COLUMN user_note TEXT",
+    }
+    for column_name, ddl in statements.items():
+        if column_name not in existing:
+            conn.execute(text(ddl))
+
+    if _table_exists(conn, "libraries"):
+        library_columns = _column_names(conn, "libraries")
+        if "owner_user_id" not in library_columns:
+            conn.execute(text("ALTER TABLE libraries ADD COLUMN owner_user_id INTEGER"))
+
+
+def _normalize_project_roots_locked(conn: Connection) -> None:
+    library_rows = conn.execute(select(libraries.c.id).order_by(libraries.c.id)).mappings().all()
+    for library_row in library_rows:
+        library_id = int(library_row["id"])
+        root_rows = conn.execute(
+            select(project_nodes.c.id)
+            .where(
+                project_nodes.c.library_id == library_id,
+                project_nodes.c.parent_id.is_(None),
+            )
+            .order_by(project_nodes.c.id)
+        ).mappings().all()
+
+        if not root_rows:
+            conn.execute(
+                insert(project_nodes).values(
+                    library_id=library_id,
+                    parent_id=None,
+                    name=ROOT_NODE_NAME,
+                    created_at=_utcnow(),
+                )
+            )
+            continue
+
+        keeper_id = int(root_rows[0]["id"])
+        conn.execute(
+            update(project_nodes)
+            .where(project_nodes.c.id == keeper_id)
+            .values(name=ROOT_NODE_NAME)
+        )
+
+        for duplicate_row in root_rows[1:]:
+            duplicate_id = int(duplicate_row["id"])
+            conn.execute(
+                update(project_nodes)
+                .where(project_nodes.c.parent_id == duplicate_id)
+                .values(parent_id=keeper_id)
+            )
+            duplicate_refs = conn.execute(
+                select(clip_node_refs.c.clip_id)
+                .where(clip_node_refs.c.node_id == duplicate_id)
+            ).mappings().all()
+            for ref_row in duplicate_refs:
+                _insert_clip_node_ref_if_missing(conn, int(ref_row["clip_id"]), keeper_id)
+            conn.execute(delete(clip_node_refs).where(clip_node_refs.c.node_id == duplicate_id))
+            conn.execute(delete(project_nodes).where(project_nodes.c.id == duplicate_id))
+
+
+def _purge_expired_recycled_clips_locked(conn: Connection) -> None:
     expired_rows = conn.execute(
-        """
-        SELECT clip_id
-        FROM recycled_clips
-        WHERE datetime(expires_at) <= datetime('now')
-        """
-    ).fetchall()
+        select(recycled_clips.c.clip_id).where(recycled_clips.c.expires_at <= _utcnow())
+    ).mappings().all()
     clip_ids = [int(row["clip_id"]) for row in expired_rows]
     if not clip_ids:
         return
 
-    placeholders = ",".join("?" for _ in clip_ids)
-    conn.execute(f"DELETE FROM recycled_clips WHERE clip_id IN ({placeholders})", clip_ids)
-    conn.execute(f"DELETE FROM clip_tags WHERE clip_id IN ({placeholders})", clip_ids)
-    conn.execute(f"DELETE FROM transcripts WHERE clip_id IN ({placeholders})", clip_ids)
-    conn.execute(f"DELETE FROM clip_node_refs WHERE clip_id IN ({placeholders})", clip_ids)
-    conn.execute(f"DELETE FROM clips WHERE id IN ({placeholders})", clip_ids)
+    conn.execute(delete(recycled_clips).where(recycled_clips.c.clip_id.in_(clip_ids)))
+    conn.execute(delete(clip_tags).where(clip_tags.c.clip_id.in_(clip_ids)))
+    conn.execute(delete(transcripts).where(transcripts.c.clip_id.in_(clip_ids)))
+    conn.execute(delete(clip_node_refs).where(clip_node_refs.c.clip_id.in_(clip_ids)))
+    conn.execute(delete(clips).where(clips.c.id.in_(clip_ids)))
 
 
-def init_db(db_path: Path = _DB_PATH) -> sqlite3.Connection:
-    """初始化数据库表和索引。"""
-    conn = get_connection(db_path)
-    try:
-        with _DB_LOCK:
-            conn.executescript(
-                """
-                CREATE TABLE IF NOT EXISTS libraries (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    name TEXT NOT NULL UNIQUE,
-                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
-                );
-
-                CREATE TABLE IF NOT EXISTS clips (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    video_hash TEXT NOT NULL UNIQUE,
-                    library_id INTEGER NOT NULL DEFAULT 1,
-                    filename TEXT NOT NULL,
-                    filepath TEXT NOT NULL,
-                    summary TEXT,
-                    scene TEXT,
-                    subjects_json TEXT NOT NULL DEFAULT '[]',
-                    actions_json TEXT NOT NULL DEFAULT '[]',
-                    has_motion INTEGER,
-                    sharpness_score REAL,
-                    cover_path TEXT,
-                    status TEXT NOT NULL DEFAULT 'pending',
-                    error_message TEXT,
-                    transcript_status TEXT NOT NULL DEFAULT 'pending',
-                    transcript_error_message TEXT,
-                    preview_status TEXT NOT NULL DEFAULT 'pending',
-                    preview_path TEXT,
-                    preview_error_message TEXT,
-                    comparison_status TEXT NOT NULL DEFAULT 'pending',
-                    comparison_scores_json TEXT,
-                    comparison_error_message TEXT,
-                    user_note TEXT,
-                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                    FOREIGN KEY (library_id) REFERENCES libraries(id)
-                );
-
-                CREATE TABLE IF NOT EXISTS clip_tags (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    clip_id INTEGER NOT NULL,
-                    tag TEXT NOT NULL,
-                    FOREIGN KEY (clip_id) REFERENCES clips(id) ON DELETE CASCADE,
-                    UNIQUE (clip_id, tag)
-                );
-
-                CREATE TABLE IF NOT EXISTS transcripts (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    clip_id INTEGER NOT NULL,
-                    start_ms INTEGER NOT NULL,
-                    end_ms INTEGER NOT NULL,
-                    text TEXT NOT NULL,
-                    segment_index INTEGER NOT NULL,
-                    FOREIGN KEY (clip_id) REFERENCES clips(id) ON DELETE CASCADE
-                );
-
-                CREATE INDEX IF NOT EXISTS idx_clips_filename ON clips(filename);
-                CREATE INDEX IF NOT EXISTS idx_clip_tags_tag ON clip_tags(tag);
-                CREATE INDEX IF NOT EXISTS idx_clip_tags_clip_id ON clip_tags(clip_id);
-                CREATE INDEX IF NOT EXISTS idx_transcripts_clip_id ON transcripts(clip_id);
-
-                CREATE TABLE IF NOT EXISTS project_nodes (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    library_id INTEGER NOT NULL,
-                    parent_id INTEGER,
-                    name TEXT NOT NULL,
-                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                    FOREIGN KEY (library_id) REFERENCES libraries(id) ON DELETE CASCADE,
-                    FOREIGN KEY (parent_id) REFERENCES project_nodes(id) ON DELETE CASCADE,
-                    UNIQUE (library_id, parent_id, name)
-                );
-
-                CREATE TABLE IF NOT EXISTS clip_node_refs (
-                    clip_id INTEGER NOT NULL,
-                    node_id INTEGER NOT NULL,
-                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                    FOREIGN KEY (clip_id) REFERENCES clips(id) ON DELETE CASCADE,
-                    FOREIGN KEY (node_id) REFERENCES project_nodes(id) ON DELETE CASCADE,
-                    UNIQUE (clip_id, node_id)
-                );
-
-                CREATE TABLE IF NOT EXISTS recycled_clips (
-                    clip_id INTEGER PRIMARY KEY,
-                    library_id INTEGER NOT NULL,
-                    deleted_node_ids_json TEXT NOT NULL DEFAULT '[]',
-                    deleted_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                    expires_at TIMESTAMP NOT NULL,
-                    FOREIGN KEY (clip_id) REFERENCES clips(id) ON DELETE CASCADE,
-                    FOREIGN KEY (library_id) REFERENCES libraries(id) ON DELETE CASCADE
-                );
-
-                CREATE INDEX IF NOT EXISTS idx_project_nodes_library_id ON project_nodes(library_id);
-                CREATE INDEX IF NOT EXISTS idx_project_nodes_parent_id ON project_nodes(parent_id);
-                CREATE INDEX IF NOT EXISTS idx_clip_node_refs_node_id ON clip_node_refs(node_id);
-                CREATE INDEX IF NOT EXISTS idx_clip_node_refs_clip_id ON clip_node_refs(clip_id);
-                CREATE INDEX IF NOT EXISTS idx_recycled_clips_library_id ON recycled_clips(library_id);
-                CREATE INDEX IF NOT EXISTS idx_recycled_clips_expires_at ON recycled_clips(expires_at);
-                """
+def _ensure_default_library_locked(conn: Connection) -> None:
+    row = conn.execute(
+        select(libraries.c.id).where(libraries.c.id == 1)
+    ).first()
+    if row is None:
+        conn.execute(
+            insert(libraries).values(
+                id=1,
+                name=DEFAULT_LIBRARY_NAME,
+                created_at=_utcnow(),
             )
-            conn.execute(
-                "INSERT OR IGNORE INTO libraries (id, name) VALUES (1, ?)",
-                (DEFAULT_LIBRARY_NAME,),
-            )
-
-            columns = {
-                row["name"]
-                for row in conn.execute("PRAGMA table_info(clips)").fetchall()
-            }
-            if "library_id" not in columns:
-                conn.execute("ALTER TABLE clips ADD COLUMN library_id INTEGER NOT NULL DEFAULT 1")
-            if "transcript_status" not in columns:
-                conn.execute("ALTER TABLE clips ADD COLUMN transcript_status TEXT NOT NULL DEFAULT 'pending'")
-            if "transcript_error_message" not in columns:
-                conn.execute("ALTER TABLE clips ADD COLUMN transcript_error_message TEXT")
-            if "preview_status" not in columns:
-                conn.execute("ALTER TABLE clips ADD COLUMN preview_status TEXT NOT NULL DEFAULT 'pending'")
-            if "preview_path" not in columns:
-                conn.execute("ALTER TABLE clips ADD COLUMN preview_path TEXT")
-            if "preview_error_message" not in columns:
-                conn.execute("ALTER TABLE clips ADD COLUMN preview_error_message TEXT")
-            if "comparison_status" not in columns:
-                conn.execute("ALTER TABLE clips ADD COLUMN comparison_status TEXT NOT NULL DEFAULT 'pending'")
-            if "comparison_scores_json" not in columns:
-                conn.execute("ALTER TABLE clips ADD COLUMN comparison_scores_json TEXT")
-            if "comparison_error_message" not in columns:
-                conn.execute("ALTER TABLE clips ADD COLUMN comparison_error_message TEXT")
-            if "user_note" not in columns:
-                conn.execute("ALTER TABLE clips ADD COLUMN user_note TEXT")
-            conn.execute("UPDATE clips SET library_id = 1 WHERE library_id IS NULL")
-            conn.execute(
-                "UPDATE clips SET transcript_status = 'pending' "
-                "WHERE transcript_status IS NULL OR transcript_status = ''"
-            )
-            conn.execute(
-                "UPDATE clips SET preview_status = 'pending' "
-                "WHERE preview_status IS NULL OR preview_status = ''"
-            )
-            conn.execute(
-                "UPDATE clips SET comparison_status = 'pending' "
-                "WHERE comparison_status IS NULL OR comparison_status = ''"
-            )
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_clips_library_id ON clips(library_id)")
-            library_rows = conn.execute("SELECT id FROM libraries").fetchall()
-            for library_row in library_rows:
-                existing_root = conn.execute(
-                    """
-                    SELECT id
-                    FROM project_nodes
-                    WHERE library_id = ? AND parent_id IS NULL
-                    ORDER BY id ASC
-                    LIMIT 1
-                    """,
-                    (int(library_row["id"]),),
-                ).fetchone()
-                if existing_root is None:
-                    conn.execute(
-                        """
-                        INSERT INTO project_nodes (library_id, parent_id, name)
-                        VALUES (?, NULL, ?)
-                        """,
-                        (int(library_row["id"]), ROOT_NODE_NAME),
-                    )
-            _normalize_project_roots_locked(conn)
-            conn.execute(
-                """
-                CREATE UNIQUE INDEX IF NOT EXISTS idx_project_nodes_root_unique
-                ON project_nodes(library_id) WHERE parent_id IS NULL
-                """
-            )
-            conn.execute(
-                """
-                INSERT OR IGNORE INTO clip_node_refs (clip_id, node_id)
-                SELECT c.id, n.id
-                FROM clips c
-                JOIN project_nodes n
-                  ON n.library_id = c.library_id
-                 AND n.parent_id IS NULL
-                 AND n.name = ?
-                LEFT JOIN clip_node_refs r ON r.clip_id = c.id
-                WHERE r.clip_id IS NULL
-                """,
-                (ROOT_NODE_NAME,),
-            )
-            _purge_expired_recycled_clips_locked(conn)
-            conn.commit()
-    except sqlite3.OperationalError as exc:
-        if "database is locked" not in str(exc).lower():
-            raise
-    return conn
-
-
-def list_libraries(db_path: Path = _DB_PATH) -> list[LibraryRecord]:
-    """读取所有素材库及其素材数量。"""
-    conn = get_connection(db_path)
-    with _DB_LOCK:
-        rows = conn.execute(
-            """
-            SELECT
-                l.id,
-                l.name,
-                COUNT(DISTINCT CASE WHEN rc.clip_id IS NULL THEN c.id END) AS clip_count
-            FROM libraries l
-            LEFT JOIN clips c ON c.library_id = l.id AND c.status = 'done'
-            LEFT JOIN recycled_clips rc ON rc.clip_id = c.id
-            GROUP BY l.id
-            ORDER BY l.created_at ASC, l.id ASC
-            """
-        ).fetchall()
-    return [
-        LibraryRecord(
-            id=int(row["id"]),
-            name=row["name"],
-            clip_count=int(row["clip_count"]),
         )
-        for row in rows
+
+
+def _ensure_default_users_locked(conn: Connection) -> None:
+    user_count_row = conn.execute(select(func.count(users.c.id).label("count"))).mappings().first()
+    if int(user_count_row["count"] or 0) > 0:
+        return
+
+    now = _utcnow()
+    default_users = [
+        {
+            "username": "admin",
+            "password": "admin123",
+            "role": "admin",
+            "display_name": "Administrator",
+        },
+        {
+            "username": "demo",
+            "password": "demo123",
+            "role": "user",
+            "display_name": "Demo User",
+        },
     ]
+    for item in default_users:
+        conn.execute(
+            insert(users).values(
+                username=item["username"],
+                password_hash=_hash_password(item["password"]),
+                role=item["role"],
+                display_name=item["display_name"],
+                is_active=True,
+                created_at=now,
+                updated_at=now,
+            )
+        )
 
 
-def create_library(name: str, db_path: Path = _DB_PATH) -> LibraryRecord:
-    """创建素材库。"""
+def _assign_unowned_libraries_to_admin_locked(conn: Connection) -> None:
+    admin_row = conn.execute(
+        select(users.c.id).where(users.c.role == "admin").order_by(users.c.id.asc()).limit(1)
+    ).mappings().first()
+    if admin_row is None:
+        return
+    admin_user_id = int(admin_row["id"])
+    conn.execute(
+        update(libraries)
+        .where(libraries.c.owner_user_id.is_(None))
+        .values(owner_user_id=admin_user_id)
+    )
+
+
+def _ensure_root_nodes_locked(conn: Connection) -> None:
+    library_rows = conn.execute(select(libraries.c.id)).mappings().all()
+    for library_row in library_rows:
+        library_id = int(library_row["id"])
+        exists_row = conn.execute(
+            select(project_nodes.c.id).where(
+                project_nodes.c.library_id == library_id,
+                project_nodes.c.parent_id.is_(None),
+            )
+        ).first()
+        if exists_row is None:
+            conn.execute(
+                insert(project_nodes).values(
+                    library_id=library_id,
+                    parent_id=None,
+                    name=ROOT_NODE_NAME,
+                    created_at=_utcnow(),
+                )
+            )
+
+
+def _insert_clip_node_ref_if_missing(conn: Connection, clip_id: int, node_id: int) -> None:
+    existing = conn.execute(
+        select(clip_node_refs.c.clip_id).where(
+            clip_node_refs.c.clip_id == clip_id,
+            clip_node_refs.c.node_id == node_id,
+        )
+    ).first()
+    if existing is None:
+        conn.execute(
+            insert(clip_node_refs).values(
+                clip_id=clip_id,
+                node_id=node_id,
+                created_at=_utcnow(),
+            )
+        )
+
+
+def _ensure_root_refs_locked(conn: Connection) -> None:
+    root_rows = conn.execute(
+        select(project_nodes.c.id, project_nodes.c.library_id).where(project_nodes.c.parent_id.is_(None))
+    ).mappings().all()
+    root_map = {int(row["library_id"]): int(row["id"]) for row in root_rows}
+
+    clip_rows = conn.execute(select(clips.c.id, clips.c.library_id)).mappings().all()
+    for clip_row in clip_rows:
+        clip_id = int(clip_row["id"])
+        library_id = int(clip_row["library_id"])
+        root_id = root_map.get(library_id)
+        if root_id is not None:
+            _insert_clip_node_ref_if_missing(conn, clip_id, root_id)
+
+
+def init_db(db_path: Path = _DB_PATH) -> Engine:
+    engine = get_engine(db_path)
+
+    def _init() -> Engine:
+        with _DB_LOCK:
+            metadata.create_all(engine)
+            with engine.begin() as conn:
+                _ensure_legacy_columns(conn)
+                _ensure_default_users_locked(conn)
+                _ensure_default_library_locked(conn)
+                _assign_unowned_libraries_to_admin_locked(conn)
+                _ensure_root_nodes_locked(conn)
+                _normalize_project_roots_locked(conn)
+                _ensure_root_refs_locked(conn)
+                _purge_expired_recycled_clips_locked(conn)
+        return engine
+
+    return _with_retry(_init)
+
+
+def _fetch_all(stmt, params: dict[str, Any] | None = None, db_path: Path = _DB_PATH) -> list[RowMapping]:
+    engine = get_engine(db_path)
+    with engine.connect() as conn:
+        return conn.execute(stmt, params or {}).mappings().all()
+
+
+def _fetch_one(stmt, params: dict[str, Any] | None = None, db_path: Path = _DB_PATH) -> RowMapping | None:
+    engine = get_engine(db_path)
+    with engine.connect() as conn:
+        return conn.execute(stmt, params or {}).mappings().first()
+
+
+def _row_to_library(row: RowMapping) -> LibraryRecord:
+    return LibraryRecord(
+        id=int(row["id"]),
+        name=str(row["name"]),
+        clip_count=int(row.get("clip_count", 0) or 0),
+        owner_user_id=int(row["owner_user_id"]) if row.get("owner_user_id") is not None else None,
+    )
+
+
+def _row_to_user(row: RowMapping) -> UserRecord:
+    return UserRecord(
+        id=int(row["id"]),
+        username=str(row["username"]),
+        role=str(row["role"]),
+        display_name=str(row.get("display_name") or row["username"]),
+        is_active=bool(row.get("is_active", True)),
+        phone_number=str(row["phone_number"]) if row.get("phone_number") else None,
+        phone_verified_at=row.get("phone_verified_at"),
+    )
+
+
+def _project_node_depths(rows: list[RowMapping]) -> dict[int, int]:
+    parent_map = {int(row["id"]): (int(row["parent_id"]) if row["parent_id"] is not None else None) for row in rows}
+    cache: dict[int, int] = {}
+
+    def _resolve(node_id: int) -> int:
+        if node_id in cache:
+            return cache[node_id]
+        parent_id = parent_map.get(node_id)
+        if parent_id is None:
+            cache[node_id] = 0
+            return 0
+        depth = _resolve(parent_id) + 1
+        cache[node_id] = depth
+        return depth
+
+    for node_id in parent_map:
+        _resolve(node_id)
+    return cache
+
+
+def _load_clip_tags_map(clip_ids: list[int], db_path: Path = _DB_PATH) -> dict[int, list[str]]:
+    if not clip_ids:
+        return {}
+    rows = _fetch_all(
+        select(clip_tags.c.clip_id, clip_tags.c.tag)
+        .where(clip_tags.c.clip_id.in_(clip_ids))
+        .order_by(clip_tags.c.id.asc()),
+        db_path=db_path,
+    )
+    tag_map: dict[int, list[str]] = {clip_id: [] for clip_id in clip_ids}
+    for row in rows:
+        clip_id = int(row["clip_id"])
+        tag_map.setdefault(clip_id, []).append(str(row["tag"]))
+    return tag_map
+
+
+def _load_clip_folder_names_map(clip_ids: list[int], db_path: Path = _DB_PATH) -> dict[int, list[str]]:
+    if not clip_ids:
+        return {}
+    rows = _fetch_all(
+        select(
+            clip_node_refs.c.clip_id,
+            project_nodes.c.name,
+        )
+        .select_from(
+            clip_node_refs.join(project_nodes, project_nodes.c.id == clip_node_refs.c.node_id)
+        )
+        .where(
+            clip_node_refs.c.clip_id.in_(clip_ids),
+            project_nodes.c.parent_id.is_not(None),
+        )
+        .order_by(project_nodes.c.id.asc()),
+        db_path=db_path,
+    )
+    folder_map: dict[int, list[str]] = {clip_id: [] for clip_id in clip_ids}
+    for row in rows:
+        clip_id = int(row["clip_id"])
+        folder_map.setdefault(clip_id, []).append(str(row["name"]))
+    return folder_map
+
+
+def list_libraries(
+    db_path: Path = _DB_PATH,
+    *,
+    owner_user_id: int | None = None,
+    include_all: bool = True,
+) -> list[LibraryRecord]:
+    clip_count_subquery = (
+        select(
+            clips.c.library_id.label("library_id"),
+            func.count(func.distinct(clips.c.id)).label("clip_count"),
+        )
+        .select_from(
+            clips.outerjoin(recycled_clips, recycled_clips.c.clip_id == clips.c.id)
+        )
+        .where(
+            clips.c.status == "done",
+            recycled_clips.c.clip_id.is_(None),
+        )
+        .group_by(clips.c.library_id)
+        .subquery()
+    )
+
+    rows = _fetch_all(
+        select(
+            libraries.c.id,
+            libraries.c.name,
+            libraries.c.owner_user_id,
+            func.coalesce(clip_count_subquery.c.clip_count, 0).label("clip_count"),
+        )
+        .select_from(
+            libraries.outerjoin(
+                clip_count_subquery,
+                clip_count_subquery.c.library_id == libraries.c.id,
+            )
+        )
+        .where(
+            literal(True)
+            if include_all or owner_user_id is None
+            else libraries.c.owner_user_id == owner_user_id
+        )
+        .order_by(libraries.c.created_at.asc(), libraries.c.id.asc()),
+        db_path=db_path,
+    )
+    return [_row_to_library(row) for row in rows]
+
+
+def get_library_by_id(
+    library_id: int,
+    db_path: Path = _DB_PATH,
+    *,
+    owner_user_id: int | None = None,
+    include_all: bool = True,
+) -> LibraryRecord | None:
+    rows = [
+        item
+        for item in list_libraries(db_path, owner_user_id=owner_user_id, include_all=include_all)
+        if item.id == library_id
+    ]
+    return rows[0] if rows else None
+
+
+def get_library_by_name(
+    name: str,
+    db_path: Path = _DB_PATH,
+    *,
+    owner_user_id: int | None = None,
+    include_all: bool = True,
+) -> LibraryRecord | None:
+    row = _fetch_one(
+        select(libraries.c.id, libraries.c.name).where(libraries.c.name == name.strip()),
+        db_path=db_path,
+    )
+    if row is None:
+        return None
+    library = get_library_by_id(
+        int(row["id"]),
+        db_path,
+        owner_user_id=owner_user_id,
+        include_all=include_all,
+    )
+    return library
+
+
+def create_library(name: str, db_path: Path = _DB_PATH, *, owner_user_id: int | None = None) -> LibraryRecord:
     cleaned_name = name.strip()
     if not cleaned_name:
         raise ValueError("素材库名称不能为空")
 
-    conn = get_connection(db_path)
+    engine = get_engine(db_path)
 
     def _write() -> LibraryRecord:
         with _DB_LOCK:
-            cursor = conn.execute(
-                "INSERT INTO libraries (name) VALUES (?)",
-                (cleaned_name,),
-            )
-            conn.commit()
-            return LibraryRecord(id=int(cursor.lastrowid), name=cleaned_name, clip_count=0)
+            now = _utcnow()
+            with engine.begin() as conn:
+                result = conn.execute(
+                    insert(libraries).values(name=cleaned_name, owner_user_id=owner_user_id, created_at=now)
+                )
+                library_id = int(result.inserted_primary_key[0])
+                conn.execute(
+                    insert(project_nodes).values(
+                        library_id=library_id,
+                        parent_id=None,
+                        name=ROOT_NODE_NAME,
+                        created_at=now,
+                    )
+                )
+            library = get_library_by_id(library_id, db_path, include_all=True)
+            if library is None:
+                raise ValueError("素材库创建失败")
+            return library
 
-    return _with_locked_retry(_write)
-
-
-def get_library_by_id(library_id: int, db_path: Path = _DB_PATH) -> LibraryRecord | None:
-    """按 ID 读取素材库。"""
-    conn = get_connection(db_path)
-    with _DB_LOCK:
-        row = conn.execute(
-            """
-            SELECT
-                l.id,
-                l.name,
-                COUNT(DISTINCT CASE WHEN rc.clip_id IS NULL THEN c.id END) AS clip_count
-            FROM libraries l
-            LEFT JOIN clips c ON c.library_id = l.id AND c.status = 'done'
-            LEFT JOIN recycled_clips rc ON rc.clip_id = c.id
-            WHERE l.id = ?
-            GROUP BY l.id
-            """,
-            (library_id,),
-        ).fetchone()
-    if row is None:
-        return None
-    return LibraryRecord(
-        id=int(row["id"]),
-        name=row["name"],
-        clip_count=int(row["clip_count"]),
-    )
+    try:
+        return _with_retry(_write)
+    except IntegrityError as exc:
+        raise ValueError("素材库名称已存在") from exc
 
 
 def rename_library(library_id: int, new_name: str, db_path: Path = _DB_PATH) -> LibraryRecord:
-    """重命名素材库。"""
     cleaned_name = new_name.strip()
     if not cleaned_name:
         raise ValueError("素材库名称不能为空")
     if library_id == 1:
         raise ValueError("默认素材库不支持重命名")
 
-    conn = get_connection(db_path)
+    engine = get_engine(db_path)
 
     def _write() -> None:
         with _DB_LOCK:
-            conn.execute(
-                "UPDATE libraries SET name = ? WHERE id = ?",
-                (cleaned_name, library_id),
-            )
-            if conn.total_changes == 0:
-                raise ValueError("素材库不存在")
-            conn.commit()
+            with engine.begin() as conn:
+                result = conn.execute(
+                    update(libraries)
+                    .where(libraries.c.id == library_id)
+                    .values(name=cleaned_name)
+                )
+                if result.rowcount == 0:
+                    raise ValueError("素材库不存在")
 
-    _with_locked_retry(_write)
+    try:
+        _with_retry(_write)
+    except IntegrityError as exc:
+        raise ValueError("素材库名称已存在") from exc
+
     library = get_library_by_id(library_id, db_path)
     if library is None:
         raise ValueError("素材库不存在")
@@ -480,275 +898,213 @@ def rename_library(library_id: int, new_name: str, db_path: Path = _DB_PATH) -> 
 
 
 def delete_library(library_id: int, db_path: Path = _DB_PATH) -> None:
-    """删除空素材库。"""
     if library_id == 1:
         raise ValueError("默认素材库不支持删除")
 
-    conn = get_connection(db_path)
+    engine = get_engine(db_path)
 
     def _write() -> None:
         with _DB_LOCK:
-            row = conn.execute(
-                """
-                SELECT COUNT(DISTINCT c.id) AS count
-                FROM clips c
-                LEFT JOIN recycled_clips rc ON rc.clip_id = c.id
-                WHERE c.library_id = ? AND rc.clip_id IS NULL
-                """,
-                (library_id,),
-            ).fetchone()
-            if row is None:
-                raise ValueError("素材库不存在")
-            if int(row["count"]) > 0:
-                raise ValueError("素材库里还有素材，不能直接删除")
-            conn.execute("DELETE FROM libraries WHERE id = ?", (library_id,))
-            if conn.total_changes == 0:
-                raise ValueError("素材库不存在")
-            conn.commit()
+            with engine.begin() as conn:
+                count_row = conn.execute(
+                    select(func.count(func.distinct(clips.c.id)).label("count"))
+                    .select_from(
+                        clips.outerjoin(recycled_clips, recycled_clips.c.clip_id == clips.c.id)
+                    )
+                    .where(
+                        clips.c.library_id == library_id,
+                        recycled_clips.c.clip_id.is_(None),
+                    )
+                ).mappings().first()
+                if count_row is None:
+                    raise ValueError("素材库不存在")
+                if int(count_row["count"] or 0) > 0:
+                    raise ValueError("素材库里还有素材，不能直接删除")
 
-    _with_locked_retry(_write)
+                result = conn.execute(delete(libraries).where(libraries.c.id == library_id))
+                if result.rowcount == 0:
+                    raise ValueError("素材库不存在")
+
+    _with_retry(_write)
 
 
 def delete_clips(clip_ids: list[int], library_id: int, db_path: Path = _DB_PATH) -> int:
-    """批量把素材移入项目回收站。"""
     if not clip_ids:
         return 0
 
-    conn = get_connection(db_path)
-    placeholders = ",".join("?" for _ in clip_ids)
-    params = [library_id, *clip_ids]
+    engine = get_engine(db_path)
 
     def _write() -> int:
         with _DB_LOCK:
-            rows = conn.execute(
-                f"""
-                SELECT c.id
-                FROM clips c
-                LEFT JOIN recycled_clips rc ON rc.clip_id = c.id
-                WHERE c.library_id = ? AND c.id IN ({placeholders}) AND rc.clip_id IS NULL
-                """,
-                params,
-            ).fetchall()
-            target_ids = [int(row["id"]) for row in rows]
-            if not target_ids:
-                return 0
-
-            deleted_node_rows = conn.execute(
-                f"""
-                SELECT clip_id, GROUP_CONCAT(node_id) AS node_ids_text
-                FROM clip_node_refs
-                WHERE clip_id IN ({",".join("?" for _ in target_ids)})
-                GROUP BY clip_id
-                """,
-                target_ids,
-            ).fetchall()
-            deleted_node_map = {
-                int(row["clip_id"]): [
-                    int(item)
-                    for item in (row["node_ids_text"] or "").split(",")
-                    if item.strip()
-                ]
-                for row in deleted_node_rows
-            }
-            conn.executemany(
-                """
-                INSERT OR REPLACE INTO recycled_clips (
-                    clip_id,
-                    library_id,
-                    deleted_node_ids_json,
-                    deleted_at,
-                    expires_at
-                ) VALUES (?, ?, ?, CURRENT_TIMESTAMP, datetime('now', '+7 days'))
-                """,
-                [
-                    (
-                        clip_id,
-                        library_id,
-                        json.dumps(deleted_node_map.get(clip_id, []), ensure_ascii=False),
+            with engine.begin() as conn:
+                rows = conn.execute(
+                    select(clips.c.id)
+                    .select_from(
+                        clips.outerjoin(recycled_clips, recycled_clips.c.clip_id == clips.c.id)
                     )
-                    for clip_id in target_ids
-                ],
-            )
-            delete_placeholders = ",".join("?" for _ in target_ids)
-            conn.execute(f"DELETE FROM clip_node_refs WHERE clip_id IN ({delete_placeholders})", target_ids)
-            conn.commit()
-        return len(target_ids)
+                    .where(
+                        clips.c.library_id == library_id,
+                        clips.c.id.in_(clip_ids),
+                        recycled_clips.c.clip_id.is_(None),
+                    )
+                ).mappings().all()
+                target_ids = [int(row["id"]) for row in rows]
+                if not target_ids:
+                    return 0
 
-    return _with_locked_retry(_write)
+                deleted_node_rows = conn.execute(
+                    select(clip_node_refs.c.clip_id, clip_node_refs.c.node_id)
+                    .where(clip_node_refs.c.clip_id.in_(target_ids))
+                ).mappings().all()
+                deleted_node_map: dict[int, list[int]] = {}
+                for row in deleted_node_rows:
+                    deleted_node_map.setdefault(int(row["clip_id"]), []).append(int(row["node_id"]))
+
+                now = _utcnow()
+                expires_at = now + timedelta(days=7)
+                for clip_id in target_ids:
+                    existing = conn.execute(
+                        select(recycled_clips.c.clip_id).where(recycled_clips.c.clip_id == clip_id)
+                    ).first()
+                    values = {
+                        "clip_id": clip_id,
+                        "library_id": library_id,
+                        "deleted_node_ids_json": deleted_node_map.get(clip_id, []),
+                        "deleted_at": now,
+                        "expires_at": expires_at,
+                    }
+                    if existing is None:
+                        conn.execute(insert(recycled_clips).values(**values))
+                    else:
+                        conn.execute(
+                            update(recycled_clips)
+                            .where(recycled_clips.c.clip_id == clip_id)
+                            .values(**values)
+                        )
+
+                conn.execute(delete(clip_node_refs).where(clip_node_refs.c.clip_id.in_(target_ids)))
+                return len(target_ids)
+
+    return _with_retry(_write)
 
 
 def save_clip(record: ClipRecord, db_path: Path = _DB_PATH) -> int:
-    """插入或更新 clip，并同步 tags。"""
-    conn = get_connection(db_path)
+    engine = get_engine(db_path)
 
     def _write() -> int:
         with _DB_LOCK:
-            conn.execute(
-                """
-                INSERT INTO clips (
-                    video_hash,
-                    library_id,
-                    filename,
-                    filepath,
-                    summary,
-                    scene,
-                    subjects_json,
-                    actions_json,
-                    has_motion,
-                    sharpness_score,
-                    cover_path,
-                    status,
-                    error_message,
-                    transcript_status,
-                    transcript_error_message,
-                    preview_status,
-                    preview_path,
-                    preview_error_message,
-                    comparison_status,
-                    comparison_scores_json,
-                    comparison_error_message,
-                    user_note,
-                    updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-                ON CONFLICT(video_hash) DO UPDATE SET
-                    library_id=excluded.library_id,
-                    filename=excluded.filename,
-                    filepath=excluded.filepath,
-                    summary=excluded.summary,
-                    scene=excluded.scene,
-                    subjects_json=excluded.subjects_json,
-                    actions_json=excluded.actions_json,
-                    has_motion=excluded.has_motion,
-                    sharpness_score=excluded.sharpness_score,
-                    cover_path=excluded.cover_path,
-                    status=excluded.status,
-                    error_message=excluded.error_message,
-                    transcript_status=excluded.transcript_status,
-                    transcript_error_message=excluded.transcript_error_message,
-                    preview_status=excluded.preview_status,
-                    preview_path=excluded.preview_path,
-                    preview_error_message=excluded.preview_error_message,
-                    comparison_status=excluded.comparison_status,
-                    comparison_scores_json=excluded.comparison_scores_json,
-                    comparison_error_message=excluded.comparison_error_message,
-                    user_note=COALESCE(excluded.user_note, clips.user_note),
-                    updated_at=CURRENT_TIMESTAMP
-                """,
-                (
-                    record.video_hash,
-                    record.library_id,
-                    record.filename,
-                    str(record.filepath),
-                    record.summary,
-                    record.scene,
-                    json.dumps(record.subjects or [], ensure_ascii=False),
-                    json.dumps(record.actions or [], ensure_ascii=False),
-                    None if record.has_motion is None else int(record.has_motion),
-                    record.sharpness_score,
-                    str(record.cover_path) if record.cover_path else None,
-                    record.status,
-                    record.error_message,
-                    record.transcript_status,
-                    record.transcript_error_message,
-                    record.preview_status,
-                    str(record.preview_path) if record.preview_path else None,
-                    record.preview_error_message,
-                    record.comparison_status,
-                    record.comparison_scores_json,
-                    record.comparison_error_message,
-                    record.user_note,
-                ),
-            )
+            with engine.begin() as conn:
+                now = _utcnow()
+                existing_row = conn.execute(
+                    select(clips.c.id, clips.c.user_note)
+                    .where(clips.c.video_hash == record.video_hash)
+                ).mappings().first()
 
-            row = conn.execute(
-                "SELECT id FROM clips WHERE video_hash = ?",
-                (record.video_hash,),
-            ).fetchone()
-            if row is None:
-                raise RuntimeError(f"未找到已保存的 clip：{record.video_hash}")
-            clip_id = int(row["id"])
+                values = {
+                    "video_hash": record.video_hash,
+                    "library_id": record.library_id,
+                    "filename": record.filename,
+                    "filepath": str(record.filepath),
+                    "summary": record.summary,
+                    "scene": record.scene,
+                    "subjects_json": record.subjects or [],
+                    "actions_json": record.actions or [],
+                    "has_motion": record.has_motion,
+                    "sharpness_score": record.sharpness_score,
+                    "cover_path": str(record.cover_path) if record.cover_path else None,
+                    "status": record.status,
+                    "error_message": record.error_message,
+                    "transcript_status": record.transcript_status,
+                    "transcript_error_message": record.transcript_error_message,
+                    "preview_status": record.preview_status,
+                    "preview_path": str(record.preview_path) if record.preview_path else None,
+                    "preview_error_message": record.preview_error_message,
+                    "comparison_status": record.comparison_status,
+                    "comparison_scores_json": record.comparison_scores_json,
+                    "comparison_error_message": record.comparison_error_message,
+                    "user_note": record.user_note if record.user_note is not None else (existing_row["user_note"] if existing_row else None),
+                    "updated_at": now,
+                }
 
-            conn.execute("DELETE FROM clip_tags WHERE clip_id = ?", (clip_id,))
-            conn.executemany(
-                "INSERT OR IGNORE INTO clip_tags (clip_id, tag) VALUES (?, ?)",
-                [(clip_id, tag) for tag in (record.tags or [])],
-            )
-            root_row = conn.execute(
-                """
-                SELECT id
-                FROM project_nodes
-                WHERE library_id = ? AND parent_id IS NULL
-                LIMIT 1
-                """,
-                (record.library_id,),
-            ).fetchone()
-            if root_row is not None:
-                conn.execute(
-                    "INSERT OR IGNORE INTO clip_node_refs (clip_id, node_id) VALUES (?, ?)",
-                    (clip_id, int(root_row["id"])),
-                )
-            conn.commit()
-        return clip_id
+                if existing_row is None:
+                    values["created_at"] = now
+                    result = conn.execute(insert(clips).values(**values))
+                    clip_id = int(result.inserted_primary_key[0])
+                else:
+                    clip_id = int(existing_row["id"])
+                    conn.execute(
+                        update(clips)
+                        .where(clips.c.id == clip_id)
+                        .values(**values)
+                    )
 
-    return _with_locked_retry(_write)
+                conn.execute(delete(clip_tags).where(clip_tags.c.clip_id == clip_id))
+                seen_tags: set[str] = set()
+                for tag in record.tags or []:
+                    cleaned_tag = str(tag).strip()
+                    if not cleaned_tag or cleaned_tag in seen_tags:
+                        continue
+                    seen_tags.add(cleaned_tag)
+                    conn.execute(insert(clip_tags).values(clip_id=clip_id, tag=cleaned_tag))
+
+                root_row = conn.execute(
+                    select(project_nodes.c.id).where(
+                        project_nodes.c.library_id == record.library_id,
+                        project_nodes.c.parent_id.is_(None),
+                    )
+                ).mappings().first()
+                if root_row is not None:
+                    _insert_clip_node_ref_if_missing(conn, clip_id, int(root_row["id"]))
+
+                return clip_id
+
+    return _with_retry(_write)
 
 
 def save_transcripts(records: list[TranscriptRecord], db_path: Path = _DB_PATH) -> None:
-    """覆盖保存某条素材的 transcript 分段。"""
     if not records:
         return
 
-    conn = get_connection(db_path)
+    engine = get_engine(db_path)
     clip_id = records[0].clip_id
 
     def _write() -> None:
         with _DB_LOCK:
-            conn.execute("DELETE FROM transcripts WHERE clip_id = ?", (clip_id,))
-            conn.executemany(
-                """
-                INSERT INTO transcripts (
-                    clip_id,
-                    start_ms,
-                    end_ms,
-                    text,
-                    segment_index
-                ) VALUES (?, ?, ?, ?, ?)
-                """,
-                [
-                    (
-                        record.clip_id,
-                        record.start_ms,
-                        record.end_ms,
-                        record.text,
-                        record.segment_index,
+            with engine.begin() as conn:
+                conn.execute(delete(transcripts).where(transcripts.c.clip_id == clip_id))
+                for record in records:
+                    conn.execute(
+                        insert(transcripts).values(
+                            clip_id=record.clip_id,
+                            start_ms=record.start_ms,
+                            end_ms=record.end_ms,
+                            text=record.text,
+                            segment_index=record.segment_index,
+                        )
                     )
-                    for record in records
-                ],
-            )
-            conn.commit()
 
-    _with_locked_retry(_write)
+    _with_retry(_write)
 
 
 def load_transcripts(clip_id: int, db_path: Path = _DB_PATH) -> list[TranscriptRecord]:
-    """读取单条素材的 transcript 分段。"""
-    conn = get_connection(db_path)
-    with _DB_LOCK:
-        rows = conn.execute(
-            """
-            SELECT clip_id, start_ms, end_ms, text, segment_index
-            FROM transcripts
-            WHERE clip_id = ?
-            ORDER BY segment_index ASC, start_ms ASC
-            """,
-            (clip_id,),
-        ).fetchall()
+    rows = _fetch_all(
+        select(
+            transcripts.c.clip_id,
+            transcripts.c.start_ms,
+            transcripts.c.end_ms,
+            transcripts.c.text,
+            transcripts.c.segment_index,
+        )
+        .where(transcripts.c.clip_id == clip_id)
+        .order_by(transcripts.c.segment_index.asc(), transcripts.c.start_ms.asc()),
+        db_path=db_path,
+    )
     return [
         TranscriptRecord(
             clip_id=int(row["clip_id"]),
             start_ms=int(row["start_ms"]),
             end_ms=int(row["end_ms"]),
-            text=row["text"],
+            text=str(row["text"]),
             segment_index=int(row["segment_index"]),
         )
         for row in rows
@@ -762,57 +1118,9 @@ def update_clip_summary_and_tags(
     new_tags: list[str],
     db_path: Path = _DB_PATH,
 ) -> None:
-    """更新单条素材的摘要，并追加新标签。"""
-    cleaned_summary = summary.strip()
-    if not cleaned_summary:
-        raise ValueError("摘要不能为空")
-
-    cleaned_tags: list[str] = []
-    seen_tags: set[str] = set()
-    for tag in new_tags:
-        cleaned_tag = tag.strip()
-        if not cleaned_tag:
-            continue
-        if cleaned_tag in seen_tags:
-            continue
-        seen_tags.add(cleaned_tag)
-        cleaned_tags.append(cleaned_tag)
-
-    conn = get_connection(db_path)
-
-    def _write() -> None:
-        with _DB_LOCK:
-            duplicate = conn.execute(
-                """
-                SELECT id
-                FROM clips
-                WHERE library_id = ? AND summary = ? AND id != ?
-                LIMIT 1
-                """,
-                (library_id, cleaned_summary, clip_id),
-            ).fetchone()
-            if duplicate is not None:
-                raise ValueError("同一素材库中摘要不能重名")
-
-            conn.execute(
-                """
-                UPDATE clips
-                SET summary = ?, updated_at = CURRENT_TIMESTAMP
-                WHERE id = ? AND library_id = ?
-                """,
-                (cleaned_summary, clip_id, library_id),
-            )
-            if conn.total_changes == 0:
-                raise ValueError("素材不存在")
-
-            if cleaned_tags:
-                conn.executemany(
-                    "INSERT OR IGNORE INTO clip_tags (clip_id, tag) VALUES (?, ?)",
-                    [(clip_id, tag) for tag in cleaned_tags],
-                )
-            conn.commit()
-
-    _with_locked_retry(_write)
+    update_clip_summary(clip_id, library_id, summary, db_path)
+    if new_tags:
+        append_clip_tags(clip_id, new_tags, db_path)
 
 
 def update_clip_summary(
@@ -821,40 +1129,36 @@ def update_clip_summary(
     summary: str,
     db_path: Path = _DB_PATH,
 ) -> None:
-    """更新单条素材摘要，并校验同素材库内唯一。"""
     cleaned_summary = summary.strip()
     if not cleaned_summary:
         raise ValueError("摘要不能为空")
 
-    conn = get_connection(db_path)
+    engine = get_engine(db_path)
 
     def _write() -> None:
         with _DB_LOCK:
-            duplicate = conn.execute(
-                """
-                SELECT id
-                FROM clips
-                WHERE library_id = ? AND summary = ? AND id != ?
-                LIMIT 1
-                """,
-                (library_id, cleaned_summary, clip_id),
-            ).fetchone()
-            if duplicate is not None:
-                raise ValueError("同一素材库中摘要不能重名")
+            with engine.begin() as conn:
+                duplicate = conn.execute(
+                    select(clips.c.id)
+                    .where(
+                        clips.c.library_id == library_id,
+                        clips.c.summary == cleaned_summary,
+                        clips.c.id != clip_id,
+                    )
+                    .limit(1)
+                ).first()
+                if duplicate is not None:
+                    raise ValueError("同一素材库中摘要不能重名")
 
-            cursor = conn.execute(
-                """
-                UPDATE clips
-                SET summary = ?, updated_at = CURRENT_TIMESTAMP
-                WHERE id = ? AND library_id = ?
-                """,
-                (cleaned_summary, clip_id, library_id),
-            )
-            if cursor.rowcount == 0:
-                raise ValueError("素材不存在")
-            conn.commit()
+                result = conn.execute(
+                    update(clips)
+                    .where(clips.c.id == clip_id, clips.c.library_id == library_id)
+                    .values(summary=cleaned_summary, updated_at=_utcnow())
+                )
+                if result.rowcount == 0:
+                    raise ValueError("素材不存在")
 
-    _with_locked_retry(_write)
+    _with_retry(_write)
 
 
 def append_clip_tags(
@@ -862,14 +1166,11 @@ def append_clip_tags(
     new_tags: list[str],
     db_path: Path = _DB_PATH,
 ) -> None:
-    """为单条素材追加新标签，并自动去重。"""
     cleaned_tags: list[str] = []
     seen_tags: set[str] = set()
     for tag in new_tags:
         cleaned_tag = tag.strip()
-        if not cleaned_tag:
-            continue
-        if cleaned_tag in seen_tags:
+        if not cleaned_tag or cleaned_tag in seen_tags:
             continue
         seen_tags.add(cleaned_tag)
         cleaned_tags.append(cleaned_tag)
@@ -877,24 +1178,29 @@ def append_clip_tags(
     if not cleaned_tags:
         raise ValueError("请至少填写一个标签")
 
-    conn = get_connection(db_path)
+    engine = get_engine(db_path)
 
     def _write() -> None:
         with _DB_LOCK:
-            row = conn.execute("SELECT id FROM clips WHERE id = ?", (clip_id,)).fetchone()
-            if row is None:
-                raise ValueError("素材不存在")
-            conn.executemany(
-                "INSERT OR IGNORE INTO clip_tags (clip_id, tag) VALUES (?, ?)",
-                [(clip_id, tag) for tag in cleaned_tags],
-            )
-            conn.execute(
-                "UPDATE clips SET updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-                (clip_id,),
-            )
-            conn.commit()
+            with engine.begin() as conn:
+                clip_row = conn.execute(select(clips.c.id).where(clips.c.id == clip_id)).first()
+                if clip_row is None:
+                    raise ValueError("素材不存在")
 
-    _with_locked_retry(_write)
+                existing_tags = {
+                    str(row["tag"])
+                    for row in conn.execute(
+                        select(clip_tags.c.tag).where(clip_tags.c.clip_id == clip_id)
+                    ).mappings()
+                }
+                for tag in cleaned_tags:
+                    if tag not in existing_tags:
+                        conn.execute(insert(clip_tags).values(clip_id=clip_id, tag=tag))
+                conn.execute(
+                    update(clips).where(clips.c.id == clip_id).values(updated_at=_utcnow())
+                )
+
+    _with_retry(_write)
 
 
 def update_clip_note(
@@ -902,108 +1208,91 @@ def update_clip_note(
     note: str,
     db_path: Path = _DB_PATH,
 ) -> None:
-    """更新单条素材的用户批注。"""
     cleaned_note = note.strip()
-    conn = get_connection(db_path)
+    engine = get_engine(db_path)
 
     def _write() -> None:
         with _DB_LOCK:
-            cursor = conn.execute(
-                """
-                UPDATE clips
-                SET user_note = ?, updated_at = CURRENT_TIMESTAMP
-                WHERE id = ?
-                """,
-                (cleaned_note or None, clip_id),
-            )
-            if cursor.rowcount == 0:
-                raise ValueError("素材不存在")
-            conn.commit()
+            with engine.begin() as conn:
+                result = conn.execute(
+                    update(clips)
+                    .where(clips.c.id == clip_id)
+                    .values(user_note=cleaned_note or None, updated_at=_utcnow())
+                )
+                if result.rowcount == 0:
+                    raise ValueError("素材不存在")
 
-    _with_locked_retry(_write)
+    _with_retry(_write)
 
 
 def list_project_nodes(library_id: int, db_path: Path = _DB_PATH) -> list[ProjectNodeRecord]:
-    """读取项目内的文件夹树节点。"""
-    conn = get_connection(db_path)
-    with _DB_LOCK:
-        rows = conn.execute(
-            """
-            WITH RECURSIVE node_tree AS (
-                SELECT id, library_id, parent_id, name, 0 AS depth
-                FROM project_nodes
-                WHERE library_id = ? AND parent_id IS NULL
-                UNION ALL
-                SELECT n.id, n.library_id, n.parent_id, n.name, node_tree.depth + 1 AS depth
-                FROM project_nodes n
-                JOIN node_tree ON n.parent_id = node_tree.id
-            )
-            SELECT
-                node_tree.id,
-                node_tree.library_id,
-                node_tree.parent_id,
-                node_tree.name,
-                node_tree.depth,
-                COUNT(DISTINCT CASE WHEN rc.clip_id IS NULL THEN r.clip_id END) AS clip_count
-            FROM node_tree
-            LEFT JOIN clip_node_refs r ON r.node_id = node_tree.id
-            LEFT JOIN recycled_clips rc ON rc.clip_id = r.clip_id
-            GROUP BY node_tree.id, node_tree.library_id, node_tree.parent_id, node_tree.name, node_tree.depth
-            ORDER BY node_tree.depth ASC, node_tree.parent_id ASC, node_tree.id ASC
-            """,
-            (library_id,),
-        ).fetchall()
+    node_rows = _fetch_all(
+        select(
+            project_nodes.c.id,
+            project_nodes.c.library_id,
+            project_nodes.c.parent_id,
+            project_nodes.c.name,
+        )
+        .where(project_nodes.c.library_id == library_id)
+        .order_by(project_nodes.c.id.asc()),
+        db_path=db_path,
+    )
+    if not node_rows:
+        return []
+
+    depth_map = _project_node_depths(node_rows)
+    count_rows = _fetch_all(
+        select(
+            clip_node_refs.c.node_id,
+            func.count(func.distinct(clip_node_refs.c.clip_id)).label("clip_count"),
+        )
+        .select_from(
+            clip_node_refs.outerjoin(recycled_clips, recycled_clips.c.clip_id == clip_node_refs.c.clip_id)
+        )
+        .where(
+            clip_node_refs.c.node_id.in_([int(row["id"]) for row in node_rows]),
+            recycled_clips.c.clip_id.is_(None),
+        )
+        .group_by(clip_node_refs.c.node_id),
+        db_path=db_path,
+    )
+    count_map = {int(row["node_id"]): int(row["clip_count"] or 0) for row in count_rows}
+
+    ordered_rows = sorted(
+        node_rows,
+        key=lambda row: (depth_map[int(row["id"])], int(row["parent_id"]) if row["parent_id"] is not None else -1, int(row["id"])),
+    )
     return [
         ProjectNodeRecord(
             id=int(row["id"]),
             library_id=int(row["library_id"]),
             parent_id=int(row["parent_id"]) if row["parent_id"] is not None else None,
-            name=row["name"],
-            depth=int(row["depth"]),
-            clip_count=int(row["clip_count"]),
+            name=str(row["name"]),
+            depth=depth_map[int(row["id"])],
+            clip_count=count_map.get(int(row["id"]), 0),
         )
-        for row in rows
+        for row in ordered_rows
     ]
 
 
 def get_project_node(node_id: int, db_path: Path = _DB_PATH) -> ProjectNodeRecord | None:
-    """按 ID 读取单个项目节点。"""
-    conn = get_connection(db_path)
-    with _DB_LOCK:
-        row = conn.execute(
-            """
-            SELECT
-                n.id,
-                n.library_id,
-                n.parent_id,
-                n.name,
-                COUNT(DISTINCT CASE WHEN rc.clip_id IS NULL THEN r.clip_id END) AS clip_count
-            FROM project_nodes n
-            LEFT JOIN clip_node_refs r ON r.node_id = n.id
-            LEFT JOIN recycled_clips rc ON rc.clip_id = r.clip_id
-            WHERE n.id = ?
-            GROUP BY n.id, n.library_id, n.parent_id, n.name
-            """,
-            (node_id,),
-        ).fetchone()
+    row = _fetch_one(
+        select(
+            project_nodes.c.id,
+            project_nodes.c.library_id,
+            project_nodes.c.parent_id,
+            project_nodes.c.name,
+        ).where(project_nodes.c.id == node_id),
+        db_path=db_path,
+    )
     if row is None:
         return None
-    depth = 0
-    parent_id = row["parent_id"]
-    while parent_id is not None:
-        parent_row = conn.execute("SELECT parent_id FROM project_nodes WHERE id = ?", (parent_id,)).fetchone()
-        if parent_row is None:
-            break
-        depth += 1
-        parent_id = parent_row["parent_id"]
-    return ProjectNodeRecord(
-        id=int(row["id"]),
-        library_id=int(row["library_id"]),
-        parent_id=int(row["parent_id"]) if row["parent_id"] is not None else None,
-        name=row["name"],
-        depth=depth,
-        clip_count=int(row["clip_count"]),
-    )
+
+    nodes = list_project_nodes(int(row["library_id"]), db_path)
+    for node in nodes:
+        if node.id == node_id:
+            return node
+    return None
 
 
 def create_project_node(
@@ -1012,32 +1301,45 @@ def create_project_node(
     parent_id: int | None = None,
     db_path: Path = _DB_PATH,
 ) -> ProjectNodeRecord:
-    """在项目内创建文件夹节点。"""
     cleaned_name = name.strip()
     if not cleaned_name:
         raise ValueError("文件夹名称不能为空")
-    conn = get_connection(db_path)
+
+    engine = get_engine(db_path)
 
     def _write() -> ProjectNodeRecord:
         with _DB_LOCK:
-            if parent_id is not None:
-                parent_row = conn.execute(
-                    "SELECT id FROM project_nodes WHERE id = ? AND library_id = ?",
-                    (parent_id, library_id),
-                ).fetchone()
-                if parent_row is None:
-                    raise ValueError("父文件夹不存在")
-            cursor = conn.execute(
-                "INSERT INTO project_nodes (library_id, parent_id, name) VALUES (?, ?, ?)",
-                (library_id, parent_id, cleaned_name),
-            )
-            conn.commit()
-            node = get_project_node(int(cursor.lastrowid), db_path)
+            with engine.begin() as conn:
+                if parent_id is not None:
+                    parent_row = conn.execute(
+                        select(project_nodes.c.id).where(
+                            project_nodes.c.id == parent_id,
+                            project_nodes.c.library_id == library_id,
+                        )
+                    ).first()
+                    if parent_row is None:
+                        raise ValueError("父文件夹不存在")
+
+                try:
+                    result = conn.execute(
+                        insert(project_nodes).values(
+                            library_id=library_id,
+                            parent_id=parent_id,
+                            name=cleaned_name,
+                            created_at=_utcnow(),
+                        )
+                    )
+                except IntegrityError as exc:
+                    raise ValueError("同级文件夹名称已存在") from exc
+
+                node_id = int(result.inserted_primary_key[0])
+
+            node = get_project_node(node_id, db_path)
             if node is None:
                 raise ValueError("文件夹创建失败")
             return node
 
-    return _with_locked_retry(_write)
+    return _with_retry(_write)
 
 
 def rename_project_node(
@@ -1046,33 +1348,41 @@ def rename_project_node(
     new_name: str,
     db_path: Path = _DB_PATH,
 ) -> ProjectNodeRecord:
-    """重命名项目节点。"""
     cleaned_name = new_name.strip()
     if not cleaned_name:
         raise ValueError("文件夹名称不能为空")
-    conn = get_connection(db_path)
+
+    engine = get_engine(db_path)
 
     def _write() -> ProjectNodeRecord:
         with _DB_LOCK:
-            row = conn.execute(
-                "SELECT parent_id FROM project_nodes WHERE id = ? AND library_id = ?",
-                (node_id, library_id),
-            ).fetchone()
-            if row is None:
-                raise ValueError("文件夹不存在")
-            if row["parent_id"] is None:
-                raise ValueError("根节点不支持重命名")
-            conn.execute(
-                "UPDATE project_nodes SET name = ? WHERE id = ? AND library_id = ?",
-                (cleaned_name, node_id, library_id),
-            )
-            conn.commit()
+            with engine.begin() as conn:
+                row = conn.execute(
+                    select(project_nodes.c.parent_id).where(
+                        project_nodes.c.id == node_id,
+                        project_nodes.c.library_id == library_id,
+                    )
+                ).mappings().first()
+                if row is None:
+                    raise ValueError("文件夹不存在")
+                if row["parent_id"] is None:
+                    raise ValueError("根节点不支持重命名")
+
+                try:
+                    conn.execute(
+                        update(project_nodes)
+                        .where(project_nodes.c.id == node_id, project_nodes.c.library_id == library_id)
+                        .values(name=cleaned_name)
+                    )
+                except IntegrityError as exc:
+                    raise ValueError("同级文件夹名称已存在") from exc
+
             node = get_project_node(node_id, db_path)
             if node is None:
                 raise ValueError("文件夹不存在")
             return node
 
-    return _with_locked_retry(_write)
+    return _with_retry(_write)
 
 
 def move_project_node(
@@ -1081,56 +1391,50 @@ def move_project_node(
     target_parent_id: int | None,
     db_path: Path = _DB_PATH,
 ) -> ProjectNodeRecord:
-    """移动项目节点到新的父节点下。"""
-    conn = get_connection(db_path)
+    engine = get_engine(db_path)
 
     def _write() -> ProjectNodeRecord:
         with _DB_LOCK:
-            row = conn.execute(
-                "SELECT parent_id FROM project_nodes WHERE id = ? AND library_id = ?",
-                (node_id, library_id),
-            ).fetchone()
-            if row is None:
-                raise ValueError("文件夹不存在")
-            if row["parent_id"] is None:
-                raise ValueError("根节点不支持移动")
+            with engine.begin() as conn:
+                rows = conn.execute(
+                    select(project_nodes.c.id, project_nodes.c.parent_id)
+                    .where(project_nodes.c.library_id == library_id)
+                ).mappings().all()
+                row_map = {int(row["id"]): row for row in rows}
+                current = row_map.get(node_id)
+                if current is None:
+                    raise ValueError("文件夹不存在")
+                if current["parent_id"] is None:
+                    raise ValueError("根节点不支持移动")
 
-            if target_parent_id is not None:
-                target_row = conn.execute(
-                    "SELECT id FROM project_nodes WHERE id = ? AND library_id = ?",
-                    (target_parent_id, library_id),
-                ).fetchone()
-                if target_row is None:
+                if target_parent_id is not None and target_parent_id not in row_map:
                     raise ValueError("目标文件夹不存在")
 
-                descendants = conn.execute(
-                    """
-                    WITH RECURSIVE descendants AS (
-                        SELECT id FROM project_nodes WHERE id = ?
-                        UNION ALL
-                        SELECT n.id
-                        FROM project_nodes n
-                        JOIN descendants d ON n.parent_id = d.id
-                    )
-                    SELECT id FROM descendants
-                    """,
-                    (node_id,),
-                ).fetchall()
-                descendant_ids = {int(item["id"]) for item in descendants}
-                if target_parent_id in descendant_ids:
+                descendants: set[int] = set()
+                stack = [node_id]
+                while stack:
+                    current_id = stack.pop()
+                    descendants.add(current_id)
+                    child_ids = [int(row["id"]) for row in rows if row["parent_id"] == current_id]
+                    stack.extend(child_ids)
+                if target_parent_id in descendants:
                     raise ValueError("不能把文件夹移动到自己的子节点下")
 
-            conn.execute(
-                "UPDATE project_nodes SET parent_id = ? WHERE id = ? AND library_id = ?",
-                (target_parent_id, node_id, library_id),
-            )
-            conn.commit()
+                try:
+                    conn.execute(
+                        update(project_nodes)
+                        .where(project_nodes.c.id == node_id, project_nodes.c.library_id == library_id)
+                        .values(parent_id=target_parent_id)
+                    )
+                except IntegrityError as exc:
+                    raise ValueError("目标位置已存在同名文件夹") from exc
+
             node = get_project_node(node_id, db_path)
             if node is None:
                 raise ValueError("文件夹不存在")
             return node
 
-    return _with_locked_retry(_write)
+    return _with_retry(_write)
 
 
 def delete_project_node(
@@ -1138,41 +1442,42 @@ def delete_project_node(
     library_id: int,
     db_path: Path = _DB_PATH,
 ) -> None:
-    """删除空的项目节点。"""
-    conn = get_connection(db_path)
+    engine = get_engine(db_path)
 
     def _write() -> None:
         with _DB_LOCK:
-            row = conn.execute(
-                "SELECT parent_id FROM project_nodes WHERE id = ? AND library_id = ?",
-                (node_id, library_id),
-            ).fetchone()
-            if row is None:
-                raise ValueError("文件夹不存在")
-            if row["parent_id"] is None:
-                raise ValueError("根节点不支持删除")
+            with engine.begin() as conn:
+                row = conn.execute(
+                    select(project_nodes.c.parent_id).where(
+                        project_nodes.c.id == node_id,
+                        project_nodes.c.library_id == library_id,
+                    )
+                ).mappings().first()
+                if row is None:
+                    raise ValueError("文件夹不存在")
+                if row["parent_id"] is None:
+                    raise ValueError("根节点不支持删除")
 
-            child_row = conn.execute(
-                "SELECT 1 FROM project_nodes WHERE parent_id = ? LIMIT 1",
-                (node_id,),
-            ).fetchone()
-            if child_row is not None:
-                raise ValueError("请先移动或删除子文件夹")
+                child_row = conn.execute(
+                    select(project_nodes.c.id).where(project_nodes.c.parent_id == node_id).limit(1)
+                ).first()
+                if child_row is not None:
+                    raise ValueError("请先移动或删除子文件夹")
 
-            clip_row = conn.execute(
-                "SELECT 1 FROM clip_node_refs WHERE node_id = ? LIMIT 1",
-                (node_id,),
-            ).fetchone()
-            if clip_row is not None:
-                raise ValueError("请先移走该文件夹里的素材")
+                clip_row = conn.execute(
+                    select(clip_node_refs.c.clip_id).where(clip_node_refs.c.node_id == node_id).limit(1)
+                ).first()
+                if clip_row is not None:
+                    raise ValueError("请先移走该文件夹里的素材")
 
-            conn.execute(
-                "DELETE FROM project_nodes WHERE id = ? AND library_id = ?",
-                (node_id, library_id),
-            )
-            conn.commit()
+                conn.execute(
+                    delete(project_nodes).where(
+                        project_nodes.c.id == node_id,
+                        project_nodes.c.library_id == library_id,
+                    )
+                )
 
-    _with_locked_retry(_write)
+    _with_retry(_write)
 
 
 def attach_clip_to_node(
@@ -1180,30 +1485,22 @@ def attach_clip_to_node(
     node_id: int,
     db_path: Path = _DB_PATH,
 ) -> None:
-    """把素材引用到指定节点。"""
-    conn = get_connection(db_path)
+    engine = get_engine(db_path)
 
     def _write() -> None:
         with _DB_LOCK:
-            row = conn.execute(
-                """
-                SELECT c.id
-                FROM clips c
-                JOIN project_nodes n ON n.library_id = c.library_id
-                WHERE c.id = ? AND n.id = ?
-                """,
-                (clip_id, node_id),
-            ).fetchone()
-            if row is None:
-                raise ValueError("素材或目标文件夹不存在")
-            conn.execute(
-                "INSERT OR IGNORE INTO clip_node_refs (clip_id, node_id) VALUES (?, ?)",
-                (clip_id, node_id),
-            )
-            conn.execute("DELETE FROM recycled_clips WHERE clip_id = ?", (clip_id,))
-            conn.commit()
+            with engine.begin() as conn:
+                row = conn.execute(
+                    select(clips.c.id)
+                    .select_from(clips.join(project_nodes, project_nodes.c.library_id == clips.c.library_id))
+                    .where(clips.c.id == clip_id, project_nodes.c.id == node_id)
+                ).first()
+                if row is None:
+                    raise ValueError("素材或目标文件夹不存在")
+                _insert_clip_node_ref_if_missing(conn, clip_id, node_id)
+                conn.execute(delete(recycled_clips).where(recycled_clips.c.clip_id == clip_id))
 
-    _with_locked_retry(_write)
+    _with_retry(_write)
 
 
 def move_clip_to_node(
@@ -1212,99 +1509,93 @@ def move_clip_to_node(
     target_node_id: int | None,
     db_path: Path = _DB_PATH,
 ) -> None:
-    """把素材移动到指定文件夹；None 表示移回未分类。"""
-    conn = get_connection(db_path)
+    engine = get_engine(db_path)
 
     def _write() -> None:
         with _DB_LOCK:
-            root_row = conn.execute(
-                """
-                SELECT id
-                FROM project_nodes
-                WHERE library_id = ? AND parent_id IS NULL
-                LIMIT 1
-                """,
-                (library_id,),
-            ).fetchone()
-            if root_row is None:
-                raise ValueError("根文件夹不存在")
-            root_id = int(root_row["id"])
+            with engine.begin() as conn:
+                root_row = conn.execute(
+                    select(project_nodes.c.id).where(
+                        project_nodes.c.library_id == library_id,
+                        project_nodes.c.parent_id.is_(None),
+                    )
+                ).mappings().first()
+                if root_row is None:
+                    raise ValueError("根文件夹不存在")
+                root_id = int(root_row["id"])
 
-            clip_row = conn.execute(
-                "SELECT id FROM clips WHERE id = ? AND library_id = ?",
-                (clip_id, library_id),
-            ).fetchone()
-            if clip_row is None:
-                raise ValueError("素材不存在")
+                clip_row = conn.execute(
+                    select(clips.c.id).where(clips.c.id == clip_id, clips.c.library_id == library_id)
+                ).first()
+                if clip_row is None:
+                    raise ValueError("素材不存在")
 
-            if target_node_id is not None:
-                target_row = conn.execute(
-                    """
-                    SELECT id
-                    FROM project_nodes
-                    WHERE id = ? AND library_id = ? AND parent_id IS NOT NULL
-                    """,
-                    (target_node_id, library_id),
-                ).fetchone()
-                if target_row is None:
-                    raise ValueError("目标文件夹不存在")
+                if target_node_id is not None:
+                    target_row = conn.execute(
+                        select(project_nodes.c.id).where(
+                            project_nodes.c.id == target_node_id,
+                            project_nodes.c.library_id == library_id,
+                            project_nodes.c.parent_id.is_not(None),
+                        )
+                    ).first()
+                    if target_row is None:
+                        raise ValueError("目标文件夹不存在")
 
-            conn.execute(
-                """
-                DELETE FROM clip_node_refs
-                WHERE clip_id = ? AND node_id IN (
-                    SELECT id FROM project_nodes WHERE library_id = ? AND parent_id IS NOT NULL
-                )
-                """,
-                (clip_id, library_id),
-            )
-            conn.execute(
-                "INSERT OR IGNORE INTO clip_node_refs (clip_id, node_id) VALUES (?, ?)",
-                (clip_id, root_id),
-            )
-            if target_node_id is not None:
-                conn.execute(
-                    "INSERT OR IGNORE INTO clip_node_refs (clip_id, node_id) VALUES (?, ?)",
-                    (clip_id, target_node_id),
-                )
-            conn.execute("DELETE FROM recycled_clips WHERE clip_id = ?", (clip_id,))
-            conn.commit()
+                child_node_ids = [
+                    int(row["id"])
+                    for row in conn.execute(
+                        select(project_nodes.c.id).where(
+                            project_nodes.c.library_id == library_id,
+                            project_nodes.c.parent_id.is_not(None),
+                        )
+                    ).mappings()
+                ]
+                if child_node_ids:
+                    conn.execute(
+                        delete(clip_node_refs).where(
+                            clip_node_refs.c.clip_id == clip_id,
+                            clip_node_refs.c.node_id.in_(child_node_ids),
+                        )
+                    )
 
-    _with_locked_retry(_write)
+                _insert_clip_node_ref_if_missing(conn, clip_id, root_id)
+                if target_node_id is not None:
+                    _insert_clip_node_ref_if_missing(conn, clip_id, target_node_id)
+                conn.execute(delete(recycled_clips).where(recycled_clips.c.clip_id == clip_id))
+
+    _with_retry(_write)
 
 
 def list_recycled_clips(library_id: int, db_path: Path = _DB_PATH) -> list[RecycleClipRecord]:
-    """读取项目级回收站素材。"""
-    conn = get_connection(db_path)
+    engine = get_engine(db_path)
     with _DB_LOCK:
-        _purge_expired_recycled_clips_locked(conn)
-        rows = conn.execute(
-            """
-            SELECT
-                rc.clip_id,
-                rc.library_id,
-                rc.deleted_node_ids_json,
-                rc.deleted_at,
-                rc.expires_at,
-                c.summary,
-                c.filename
-            FROM recycled_clips rc
-            JOIN clips c ON c.id = rc.clip_id
-            WHERE rc.library_id = ?
-            ORDER BY rc.deleted_at DESC
-            """,
-            (library_id,),
-        ).fetchall()
-        conn.commit()
+        with engine.begin() as conn:
+            _purge_expired_recycled_clips_locked(conn)
+
+    rows = _fetch_all(
+        select(
+            recycled_clips.c.clip_id,
+            recycled_clips.c.library_id,
+            recycled_clips.c.deleted_node_ids_json,
+            recycled_clips.c.deleted_at,
+            recycled_clips.c.expires_at,
+            clips.c.summary,
+            clips.c.filename,
+        )
+        .select_from(recycled_clips.join(clips, clips.c.id == recycled_clips.c.clip_id))
+        .where(recycled_clips.c.library_id == library_id)
+        .order_by(recycled_clips.c.deleted_at.desc()),
+        db_path=db_path,
+    )
     return [
         RecycleClipRecord(
             clip_id=int(row["clip_id"]),
             library_id=int(row["library_id"]),
-            summary=row["summary"] or "暂无摘要",
-            filename=row["filename"],
-            deleted_at=row["deleted_at"],
-            expires_at=row["expires_at"],
-            deleted_node_ids=json.loads(row["deleted_node_ids_json"] or "[]"),
+            summary=str(row["summary"] or "暂无摘要"),
+            filename=str(row["filename"]),
+            deleted_at=str(row["deleted_at"]),
+            expires_at=str(row["expires_at"]),
+            deleted_node_ids=[int(item) for item in (row["deleted_node_ids_json"] or [])],
         )
         for row in rows
     ]
@@ -1315,50 +1606,981 @@ def restore_recycled_clips(
     clip_ids: list[int],
     db_path: Path = _DB_PATH,
 ) -> int:
-    """从项目回收站恢复素材。"""
     if not clip_ids:
         return 0
-    conn = get_connection(db_path)
+
+    engine = get_engine(db_path)
 
     def _write() -> int:
         with _DB_LOCK:
-            rows = conn.execute(
-                f"""
-                SELECT clip_id, deleted_node_ids_json
-                FROM recycled_clips
-                WHERE library_id = ? AND clip_id IN ({",".join("?" for _ in clip_ids)})
-                """,
-                [library_id, *clip_ids],
-            ).fetchall()
-            if not rows:
-                return 0
-            restored_count = 0
-            root_row = conn.execute(
-                "SELECT id FROM project_nodes WHERE library_id = ? AND parent_id IS NULL LIMIT 1",
-                (library_id,),
-            ).fetchone()
-            root_id = int(root_row["id"]) if root_row is not None else None
-            for row in rows:
-                clip_id = int(row["clip_id"])
-                node_ids = json.loads(row["deleted_node_ids_json"] or "[]")
-                valid_nodes = [
-                    int(node_id)
-                    for node_id in node_ids
-                    if conn.execute(
-                        "SELECT 1 FROM project_nodes WHERE id = ? AND library_id = ?",
-                        (int(node_id), library_id),
-                    ).fetchone()
-                    is not None
-                ]
-                if not valid_nodes and root_id is not None:
-                    valid_nodes = [root_id]
-                conn.executemany(
-                    "INSERT OR IGNORE INTO clip_node_refs (clip_id, node_id) VALUES (?, ?)",
-                    [(clip_id, node_id) for node_id in valid_nodes],
-                )
-                conn.execute("DELETE FROM recycled_clips WHERE clip_id = ?", (clip_id,))
-                restored_count += 1
-            conn.commit()
-        return restored_count
+            with engine.begin() as conn:
+                rows = conn.execute(
+                    select(recycled_clips.c.clip_id, recycled_clips.c.deleted_node_ids_json)
+                    .where(
+                        recycled_clips.c.library_id == library_id,
+                        recycled_clips.c.clip_id.in_(clip_ids),
+                    )
+                ).mappings().all()
+                if not rows:
+                    return 0
 
-    return _with_locked_retry(_write)
+                root_row = conn.execute(
+                    select(project_nodes.c.id).where(
+                        project_nodes.c.library_id == library_id,
+                        project_nodes.c.parent_id.is_(None),
+                    )
+                ).mappings().first()
+                root_id = int(root_row["id"]) if root_row is not None else None
+
+                valid_node_ids = {
+                    int(row["id"])
+                    for row in conn.execute(
+                        select(project_nodes.c.id).where(project_nodes.c.library_id == library_id)
+                    ).mappings()
+                }
+
+                restored_count = 0
+                for row in rows:
+                    clip_id = int(row["clip_id"])
+                    node_ids = [int(item) for item in (row["deleted_node_ids_json"] or [])]
+                    valid_nodes = [node_id for node_id in node_ids if node_id in valid_node_ids]
+                    if not valid_nodes and root_id is not None:
+                        valid_nodes = [root_id]
+                    for node_id in valid_nodes:
+                        _insert_clip_node_ref_if_missing(conn, clip_id, node_id)
+                    conn.execute(delete(recycled_clips).where(recycled_clips.c.clip_id == clip_id))
+                    restored_count += 1
+
+                return restored_count
+
+    return _with_retry(_write)
+
+
+def count_uncategorized_clips(library_id: int, db_path: Path = _DB_PATH) -> int:
+    child_nodes_subquery = (
+        select(project_nodes.c.id)
+        .where(
+            project_nodes.c.library_id == library_id,
+            project_nodes.c.parent_id.is_not(None),
+        )
+        .subquery()
+    )
+    row = _fetch_one(
+        select(func.count(func.distinct(clips.c.id)).label("count"))
+        .select_from(clips.outerjoin(recycled_clips, recycled_clips.c.clip_id == clips.c.id))
+        .where(
+            clips.c.library_id == library_id,
+            clips.c.status == "done",
+            recycled_clips.c.clip_id.is_(None),
+            ~exists(
+                select(literal(1))
+                .select_from(clip_node_refs)
+                .where(
+                    clip_node_refs.c.clip_id == clips.c.id,
+                    clip_node_refs.c.node_id.in_(select(child_nodes_subquery.c.id)),
+                )
+            ),
+        ),
+        db_path=db_path,
+    )
+    return int(row["count"] or 0) if row is not None else 0
+
+
+def query_clips(
+    *,
+    library_id: int,
+    query: str = "",
+    tag: str = "",
+    include_failed: bool = False,
+    node_id: int | None = None,
+    uncategorized_node_id: int | None = None,
+    db_path: Path = _DB_PATH,
+) -> list[dict[str, Any]]:
+    filters: list[Any] = [
+        clips.c.library_id == library_id,
+        recycled_clips.c.clip_id.is_(None),
+    ]
+    if not include_failed:
+        filters.append(clips.c.status == "done")
+
+    if node_id is not None:
+        if uncategorized_node_id is not None and node_id == uncategorized_node_id:
+            child_node_ids = select(project_nodes.c.id).where(
+                project_nodes.c.library_id == library_id,
+                project_nodes.c.parent_id.is_not(None),
+            )
+            filters.append(
+                ~exists(
+                    select(literal(1))
+                    .select_from(clip_node_refs)
+                    .where(
+                        clip_node_refs.c.clip_id == clips.c.id,
+                        clip_node_refs.c.node_id.in_(child_node_ids),
+                    )
+                )
+            )
+        else:
+            filters.append(
+                exists(
+                    select(literal(1))
+                    .select_from(clip_node_refs)
+                    .where(
+                        clip_node_refs.c.clip_id == clips.c.id,
+                        clip_node_refs.c.node_id == node_id,
+                    )
+                )
+            )
+
+    if query:
+        like_query = f"%{query}%"
+        filters.append(
+            or_(
+                clips.c.filename.like(like_query),
+                clips.c.summary.like(like_query),
+                clips.c.scene.like(like_query),
+                exists(
+                    select(literal(1))
+                    .select_from(clip_tags)
+                    .where(
+                        clip_tags.c.clip_id == clips.c.id,
+                        clip_tags.c.tag.like(like_query),
+                    )
+                ),
+            )
+        )
+
+    if tag:
+        filters.append(
+            exists(
+                select(literal(1))
+                .select_from(clip_tags)
+                .where(clip_tags.c.clip_id == clips.c.id, clip_tags.c.tag == tag)
+            )
+        )
+
+    rows = _fetch_all(
+        select(
+            clips.c.id,
+            clips.c.filename,
+            clips.c.filepath,
+            clips.c.summary,
+            clips.c.scene,
+            clips.c.subjects_json,
+            clips.c.actions_json,
+            clips.c.has_motion,
+            clips.c.sharpness_score,
+            clips.c.cover_path,
+            clips.c.status,
+            clips.c.error_message,
+            clips.c.transcript_status,
+            clips.c.transcript_error_message,
+            clips.c.preview_status,
+            clips.c.preview_path,
+            clips.c.preview_error_message,
+            clips.c.comparison_status,
+            clips.c.comparison_scores_json,
+            clips.c.comparison_error_message,
+        )
+        .select_from(clips.outerjoin(recycled_clips, recycled_clips.c.clip_id == clips.c.id))
+        .where(and_(*filters))
+        .order_by(clips.c.updated_at.desc(), clips.c.id.desc()),
+        db_path=db_path,
+    )
+    clip_ids = [int(row["id"]) for row in rows]
+    tag_map = _load_clip_tags_map(clip_ids, db_path)
+    folder_map = _load_clip_folder_names_map(clip_ids, db_path)
+
+    items: list[dict[str, Any]] = []
+    for row in rows:
+        clip_id = int(row["id"])
+        items.append(
+            {
+                **dict(row),
+                "subjects_json": list(row["subjects_json"] or []),
+                "actions_json": list(row["actions_json"] or []),
+                "tags": tag_map.get(clip_id, []),
+                "folder_names": folder_map.get(clip_id, []),
+            }
+        )
+    return items
+
+
+def query_clip_card(clip_id: int, db_path: Path = _DB_PATH) -> dict[str, Any] | None:
+    row = _fetch_one(
+        select(
+            clips.c.id,
+            clips.c.filename,
+            clips.c.filepath,
+            clips.c.summary,
+            clips.c.scene,
+            clips.c.subjects_json,
+            clips.c.actions_json,
+            clips.c.has_motion,
+            clips.c.sharpness_score,
+            clips.c.cover_path,
+            clips.c.status,
+            clips.c.error_message,
+            clips.c.transcript_status,
+            clips.c.transcript_error_message,
+            clips.c.preview_status,
+            clips.c.preview_path,
+            clips.c.preview_error_message,
+            clips.c.comparison_status,
+            clips.c.comparison_scores_json,
+            clips.c.comparison_error_message,
+        ).where(clips.c.id == clip_id),
+        db_path=db_path,
+    )
+    if row is None:
+        return None
+    tag_map = _load_clip_tags_map([clip_id], db_path)
+    folder_map = _load_clip_folder_names_map([clip_id], db_path)
+    return {
+        **dict(row),
+        "subjects_json": list(row["subjects_json"] or []),
+        "actions_json": list(row["actions_json"] or []),
+        "tags": tag_map.get(clip_id, []),
+        "folder_names": folder_map.get(clip_id, []),
+    }
+
+
+def query_tag_counts(
+    library_id: int,
+    node_id: int | None = None,
+    uncategorized_node_id: int | None = None,
+    db_path: Path = _DB_PATH,
+) -> list[tuple[str, int]]:
+    clip_ids = [
+        int(item["id"])
+        for item in query_clips(
+            library_id=library_id,
+            node_id=node_id,
+            uncategorized_node_id=uncategorized_node_id,
+            db_path=db_path,
+        )
+    ]
+    if not clip_ids:
+        return []
+    rows = _fetch_all(
+        select(clip_tags.c.tag, func.count(func.distinct(clip_tags.c.clip_id)).label("count"))
+        .where(clip_tags.c.clip_id.in_(clip_ids))
+        .group_by(clip_tags.c.tag)
+        .order_by(func.count(func.distinct(clip_tags.c.clip_id)).desc(), clip_tags.c.tag.asc()),
+        db_path=db_path,
+    )
+    return [(str(row["tag"]), int(row["count"] or 0)) for row in rows]
+
+
+def query_clip_detail(clip_id: int, db_path: Path = _DB_PATH) -> dict[str, Any] | None:
+    row = _fetch_one(
+        select(
+            clips.c.id,
+            clips.c.library_id,
+            clips.c.filename,
+            clips.c.filepath,
+            clips.c.summary,
+            clips.c.scene,
+            clips.c.subjects_json,
+            clips.c.actions_json,
+            clips.c.has_motion,
+            clips.c.sharpness_score,
+            clips.c.cover_path,
+            clips.c.status,
+            clips.c.error_message,
+            clips.c.transcript_status,
+            clips.c.transcript_error_message,
+            clips.c.preview_status,
+            clips.c.preview_path,
+            clips.c.preview_error_message,
+            clips.c.comparison_status,
+            clips.c.comparison_scores_json,
+            clips.c.comparison_error_message,
+            clips.c.user_note,
+            libraries.c.name.label("library_name"),
+        )
+        .select_from(clips.outerjoin(libraries, libraries.c.id == clips.c.library_id))
+        .where(clips.c.id == clip_id),
+        db_path=db_path,
+    )
+    if row is None:
+        return None
+    tag_map = _load_clip_tags_map([clip_id], db_path)
+    return {
+        **dict(row),
+        "subjects_json": list(row["subjects_json"] or []),
+        "actions_json": list(row["actions_json"] or []),
+        "tags": tag_map.get(clip_id, []),
+    }
+
+
+def query_similar_clips(
+    current_clip_id: int,
+    scene: str,
+    limit: int = 3,
+    db_path: Path = _DB_PATH,
+) -> list[dict[str, Any]]:
+    rows = _fetch_all(
+        select(
+            clips.c.id,
+            clips.c.filename,
+            clips.c.filepath,
+            clips.c.summary,
+            clips.c.scene,
+            clips.c.subjects_json,
+            clips.c.actions_json,
+            clips.c.has_motion,
+            clips.c.sharpness_score,
+            clips.c.cover_path,
+            clips.c.status,
+            clips.c.error_message,
+            clips.c.transcript_status,
+            clips.c.transcript_error_message,
+            clips.c.preview_status,
+            clips.c.preview_path,
+            clips.c.preview_error_message,
+            clips.c.comparison_status,
+            clips.c.comparison_scores_json,
+            clips.c.comparison_error_message,
+        )
+        .where(clips.c.id != current_clip_id, clips.c.scene == scene)
+        .order_by(clips.c.updated_at.desc(), clips.c.id.desc())
+        .limit(limit),
+        db_path=db_path,
+    )
+    clip_ids = [int(row["id"]) for row in rows]
+    tag_map = _load_clip_tags_map(clip_ids, db_path)
+    return [
+        {
+            **dict(row),
+            "subjects_json": list(row["subjects_json"] or []),
+            "actions_json": list(row["actions_json"] or []),
+            "tags": tag_map.get(int(row["id"]), []),
+            "folder_names": [],
+        }
+        for row in rows
+    ]
+
+
+def query_adjacent_clip_ids(clip_id: int, library_id: int, db_path: Path = _DB_PATH) -> tuple[int | None, int | None]:
+    rows = _fetch_all(
+        select(clips.c.id)
+        .where(clips.c.library_id == library_id)
+        .order_by(clips.c.updated_at.desc(), clips.c.id.desc()),
+        db_path=db_path,
+    )
+    ordered_ids = [int(row["id"]) for row in rows]
+    try:
+        current_index = ordered_ids.index(clip_id)
+    except ValueError:
+        return None, None
+    previous_id = ordered_ids[current_index - 1] if current_index > 0 else None
+    next_id = ordered_ids[current_index + 1] if current_index < len(ordered_ids) - 1 else None
+    return previous_id, next_id
+
+
+def update_clip_transcript_state(
+    clip_id: int,
+    *,
+    transcript_status: str,
+    transcript_error_message: str | None,
+    db_path: Path = _DB_PATH,
+) -> None:
+    engine = get_engine(db_path)
+
+    def _write() -> None:
+        with _DB_LOCK:
+            with engine.begin() as conn:
+                conn.execute(
+                    update(clips)
+                    .where(clips.c.id == clip_id)
+                    .values(
+                        transcript_status=transcript_status,
+                        transcript_error_message=transcript_error_message,
+                        updated_at=_utcnow(),
+                    )
+                )
+
+    _with_retry(_write)
+
+
+def update_clip_asset_state(
+    clip_id: int,
+    *,
+    preview_status: str | None = None,
+    preview_path: Path | None = None,
+    preview_error_message: str | None | object = None,
+    comparison_status: str | None = None,
+    comparison_scores: dict[str, float] | None = None,
+    comparison_error_message: str | None | object = None,
+    db_path: Path = _DB_PATH,
+) -> None:
+    values: dict[str, Any] = {"updated_at": _utcnow()}
+    if preview_status is not None:
+        values["preview_status"] = preview_status
+    if preview_path is not None:
+        values["preview_path"] = str(preview_path)
+    if preview_error_message is not None:
+        values["preview_error_message"] = preview_error_message
+    if comparison_status is not None:
+        values["comparison_status"] = comparison_status
+    if comparison_scores is not None:
+        values["comparison_scores_json"] = json.dumps(comparison_scores, ensure_ascii=False)
+    if comparison_error_message is not None:
+        values["comparison_error_message"] = comparison_error_message
+
+    engine = get_engine(db_path)
+
+    def _write() -> None:
+        with _DB_LOCK:
+            with engine.begin() as conn:
+                conn.execute(update(clips).where(clips.c.id == clip_id).values(**values))
+
+    _with_retry(_write)
+
+
+def query_export_clips(clip_ids: list[int], db_path: Path = _DB_PATH) -> list[dict[str, Any]]:
+    if not clip_ids:
+        return []
+    rows = _fetch_all(
+        select(clips.c.id, clips.c.filename, clips.c.filepath, clips.c.summary)
+        .where(clips.c.id.in_(clip_ids))
+        .order_by(clips.c.id.asc()),
+        db_path=db_path,
+    )
+    return [dict(row) for row in rows]
+
+
+def get_user_by_id(user_id: int, db_path: Path = _DB_PATH) -> UserRecord | None:
+    row = _fetch_one(
+        select(
+            users.c.id,
+            users.c.username,
+            users.c.role,
+            users.c.display_name,
+            users.c.is_active,
+            users.c.phone_number,
+            users.c.phone_verified_at,
+        ).where(users.c.id == user_id),
+        db_path=db_path,
+    )
+    return _row_to_user(row) if row is not None else None
+
+
+def get_user_by_username(username: str, db_path: Path = _DB_PATH) -> UserRecord | None:
+    row = _fetch_one(
+        select(
+            users.c.id,
+            users.c.username,
+            users.c.role,
+            users.c.display_name,
+            users.c.is_active,
+            users.c.phone_number,
+            users.c.phone_verified_at,
+        ).where(users.c.username == username.strip()),
+        db_path=db_path,
+    )
+    return _row_to_user(row) if row is not None else None
+
+
+def authenticate_user(username: str, password: str, db_path: Path = _DB_PATH) -> UserRecord | None:
+    row = _fetch_one(
+        select(
+            users.c.id,
+            users.c.username,
+            users.c.role,
+            users.c.display_name,
+            users.c.is_active,
+            users.c.phone_number,
+            users.c.phone_verified_at,
+            users.c.password_hash,
+        ).where(users.c.username == username.strip()),
+        db_path=db_path,
+    )
+    if row is None:
+        return None
+    if not bool(row["is_active"]):
+        return None
+    if not _verify_password(password, str(row["password_hash"])):
+        return None
+    return _row_to_user(row)
+
+
+def _validate_password(password: str) -> str:
+    cleaned = password.strip()
+    if len(cleaned) < 6:
+        raise ValueError("密码至少需要 6 位。")
+    return cleaned
+
+
+def create_user(
+    username: str,
+    password: str,
+    *,
+    display_name: str = "",
+    role: str = "user",
+    is_active: bool = True,
+    db_path: Path = _DB_PATH,
+) -> UserRecord:
+    cleaned_username = username.strip().lower()
+    cleaned_display_name = display_name.strip() or cleaned_username
+    cleaned_role = role.strip().lower()
+    if not cleaned_username:
+        raise ValueError("用户名不能为空。")
+    if cleaned_role not in {"user", "admin"}:
+        raise ValueError("用户角色无效。")
+    validated_password = _validate_password(password)
+    if get_user_by_username(cleaned_username, db_path) is not None:
+        raise ValueError("用户名已存在。")
+
+    engine = get_engine(db_path)
+
+    def _write() -> UserRecord:
+        with _DB_LOCK:
+            with engine.begin() as conn:
+                result = conn.execute(
+                    insert(users).values(
+                        username=cleaned_username,
+                        password_hash=_hash_password(validated_password),
+                        role=cleaned_role,
+                        display_name=cleaned_display_name,
+                        is_active=bool(is_active),
+                        created_at=_utcnow(),
+                        updated_at=_utcnow(),
+                    )
+                )
+                user_id = int(result.inserted_primary_key[0])
+                row = conn.execute(
+                    select(
+                        users.c.id,
+                        users.c.username,
+                        users.c.role,
+                        users.c.display_name,
+                        users.c.is_active,
+                        users.c.phone_number,
+                        users.c.phone_verified_at,
+                    ).where(users.c.id == user_id)
+                ).mappings().first()
+        if row is None:
+            raise RuntimeError("创建用户后未找到记录。")
+        return _row_to_user(row)
+
+    try:
+        return _with_retry(_write)
+    except IntegrityError as exc:
+        raise ValueError("用户名已存在。") from exc
+
+
+def revoke_user_sessions(
+    user_id: int,
+    db_path: Path = _DB_PATH,
+    *,
+    except_session_token: str | None = None,
+) -> None:
+    engine = get_engine(db_path)
+
+    def _write() -> None:
+        with _DB_LOCK:
+            with engine.begin() as conn:
+                stmt = delete(user_sessions).where(user_sessions.c.user_id == user_id)
+                if except_session_token:
+                    stmt = stmt.where(user_sessions.c.session_token != except_session_token)
+                conn.execute(stmt)
+
+    _with_retry(_write)
+
+
+def update_user_password(user_id: int, new_password: str, db_path: Path = _DB_PATH) -> None:
+    validated_password = _validate_password(new_password)
+    engine = get_engine(db_path)
+
+    def _write() -> None:
+        with _DB_LOCK:
+            with engine.begin() as conn:
+                conn.execute(
+                    update(users)
+                    .where(users.c.id == user_id)
+                    .values(
+                        password_hash=_hash_password(validated_password),
+                        updated_at=_utcnow(),
+                    )
+                )
+
+    _with_retry(_write)
+
+
+def change_user_password(
+    user_id: int,
+    current_password: str,
+    new_password: str,
+    db_path: Path = _DB_PATH,
+) -> None:
+    row = _fetch_one(
+        select(users.c.password_hash).where(users.c.id == user_id),
+        db_path=db_path,
+    )
+    if row is None:
+        raise ValueError("用户不存在。")
+    if not _verify_password(current_password, str(row["password_hash"])):
+        raise ValueError("当前密码不正确。")
+    update_user_password(user_id, new_password, db_path)
+
+
+def issue_phone_verification_code(
+    phone_number: str,
+    purpose: str,
+    db_path: Path = _DB_PATH,
+    *,
+    user_id: int | None = None,
+    ttl_minutes: int = 10,
+) -> str:
+    normalized_phone = _normalize_phone_number(phone_number)
+    cleaned_purpose = purpose.strip().lower()
+    if cleaned_purpose not in {"bind", "reset"}:
+        raise ValueError("验证码用途无效。")
+    if cleaned_purpose == "reset" and get_user_by_phone(normalized_phone, db_path) is None:
+        raise ValueError("这个手机号尚未绑定已验证账号。")
+    if cleaned_purpose == "bind":
+        existing_user = get_user_by_phone(normalized_phone, db_path)
+        if existing_user is not None and existing_user.id != user_id:
+            raise ValueError("这个手机号已被其他账号绑定。")
+
+    code = f"{secrets.randbelow(1_000_000):06d}"
+    engine = get_engine(db_path)
+
+    def _write() -> None:
+        with _DB_LOCK:
+            with engine.begin() as conn:
+                conn.execute(
+                    update(phone_verification_codes)
+                    .where(
+                        phone_verification_codes.c.phone_number == normalized_phone,
+                        phone_verification_codes.c.purpose == cleaned_purpose,
+                        phone_verification_codes.c.consumed_at.is_(None),
+                    )
+                    .values(consumed_at=_utcnow())
+                )
+                conn.execute(
+                    insert(phone_verification_codes).values(
+                        phone_number=normalized_phone,
+                        purpose=cleaned_purpose,
+                        user_id=user_id,
+                        code_hash=_hash_password(code),
+                        expires_at=_utcnow() + timedelta(minutes=ttl_minutes),
+                        consumed_at=None,
+                        created_at=_utcnow(),
+                    )
+                )
+
+    _with_retry(_write)
+    return code
+
+
+def _consume_phone_verification_code(
+    phone_number: str,
+    code: str,
+    purpose: str,
+    db_path: Path = _DB_PATH,
+) -> str:
+    normalized_phone = _normalize_phone_number(phone_number)
+    cleaned_code = code.strip()
+    cleaned_purpose = purpose.strip().lower()
+    if not cleaned_code:
+        raise ValueError("请输入验证码。")
+
+    engine = get_engine(db_path)
+
+    def _write() -> str:
+        with _DB_LOCK:
+            with engine.begin() as conn:
+                rows = conn.execute(
+                    select(
+                        phone_verification_codes.c.id,
+                        phone_verification_codes.c.code_hash,
+                        phone_verification_codes.c.expires_at,
+                    )
+                    .where(
+                        phone_verification_codes.c.phone_number == normalized_phone,
+                        phone_verification_codes.c.purpose == cleaned_purpose,
+                        phone_verification_codes.c.consumed_at.is_(None),
+                    )
+                    .order_by(phone_verification_codes.c.id.desc())
+                ).mappings().all()
+                for row in rows:
+                    expires_at = row["expires_at"]
+                    if expires_at <= _utcnow():
+                        continue
+                    if _verify_password(cleaned_code, str(row["code_hash"])):
+                        conn.execute(
+                            update(phone_verification_codes)
+                            .where(phone_verification_codes.c.id == int(row["id"]))
+                            .values(consumed_at=_utcnow())
+                        )
+                        return normalized_phone
+        raise ValueError("验证码无效或已过期。")
+
+    return _with_retry(_write)
+
+
+def bind_user_phone(
+    user_id: int,
+    phone_number: str,
+    code: str,
+    db_path: Path = _DB_PATH,
+) -> UserRecord:
+    normalized_phone = _consume_phone_verification_code(phone_number, code, "bind", db_path)
+    existing_user = get_user_by_phone(normalized_phone, db_path)
+    if existing_user is not None and existing_user.id != user_id:
+        raise ValueError("这个手机号已被其他账号绑定。")
+
+    engine = get_engine(db_path)
+
+    def _write() -> UserRecord:
+        with _DB_LOCK:
+            with engine.begin() as conn:
+                conn.execute(
+                    update(users)
+                    .where(users.c.id == user_id)
+                    .values(
+                        phone_number=normalized_phone,
+                        phone_verified_at=_utcnow(),
+                        updated_at=_utcnow(),
+                    )
+                )
+                row = conn.execute(
+                    select(
+                        users.c.id,
+                        users.c.username,
+                        users.c.role,
+                        users.c.display_name,
+                        users.c.is_active,
+                        users.c.phone_number,
+                        users.c.phone_verified_at,
+                    ).where(users.c.id == user_id)
+                ).mappings().first()
+        if row is None:
+            raise ValueError("用户不存在。")
+        return _row_to_user(row)
+
+    return _with_retry(_write)
+
+
+def get_user_by_phone(phone_number: str, db_path: Path = _DB_PATH) -> UserRecord | None:
+    normalized_phone = _normalize_phone_number(phone_number)
+    row = _fetch_one(
+        select(
+            users.c.id,
+            users.c.username,
+            users.c.role,
+            users.c.display_name,
+            users.c.is_active,
+            users.c.phone_number,
+            users.c.phone_verified_at,
+        ).where(
+            users.c.phone_number == normalized_phone,
+            users.c.phone_verified_at.is_not(None),
+        ),
+        db_path=db_path,
+    )
+    return _row_to_user(row) if row is not None else None
+
+
+def reset_password_by_phone(
+    phone_number: str,
+    code: str,
+    new_password: str,
+    db_path: Path = _DB_PATH,
+) -> UserRecord:
+    normalized_phone = _consume_phone_verification_code(phone_number, code, "reset", db_path)
+    user = get_user_by_phone(normalized_phone, db_path)
+    if user is None:
+        raise ValueError("这个手机号尚未绑定已验证账号。")
+    update_user_password(user.id, new_password, db_path)
+    revoke_user_sessions(user.id, db_path)
+    return user
+
+
+def update_user_status(user_id: int, is_active: bool, db_path: Path = _DB_PATH) -> None:
+    target_user = get_user_by_id(user_id, db_path)
+    if target_user is None:
+        raise ValueError("用户不存在。")
+    if target_user.role == "admin" and not is_active:
+        admin_count = int(
+            _fetch_one(
+                select(func.count()).select_from(users).where(
+                    users.c.role == "admin",
+                    users.c.is_active.is_(True),
+                ),
+                db_path=db_path,
+            )["count_1"]
+        )
+        if admin_count <= 1:
+            raise ValueError("至少需要保留一个启用中的管理员。")
+
+    engine = get_engine(db_path)
+
+    def _write() -> None:
+        with _DB_LOCK:
+            with engine.begin() as conn:
+                conn.execute(
+                    update(users)
+                    .where(users.c.id == user_id)
+                    .values(
+                        is_active=bool(is_active),
+                        updated_at=_utcnow(),
+                    )
+                )
+
+    _with_retry(_write)
+    if not is_active:
+        revoke_user_sessions(user_id, db_path)
+
+
+def create_session(user_id: int, db_path: Path = _DB_PATH, *, ttl_days: int = 7) -> str:
+    engine = get_engine(db_path)
+    session_token = secrets.token_urlsafe(32)
+
+    def _write() -> str:
+        with _DB_LOCK:
+            with engine.begin() as conn:
+                conn.execute(
+                    insert(user_sessions).values(
+                        user_id=user_id,
+                        session_token=session_token,
+                        expires_at=_utcnow() + timedelta(days=ttl_days),
+                        created_at=_utcnow(),
+                    )
+                )
+        return session_token
+
+    return _with_retry(_write)
+
+
+def delete_session(session_token: str, db_path: Path = _DB_PATH) -> None:
+    if not session_token:
+        return
+    engine = get_engine(db_path)
+
+    def _write() -> None:
+        with _DB_LOCK:
+            with engine.begin() as conn:
+                conn.execute(delete(user_sessions).where(user_sessions.c.session_token == session_token))
+
+    _with_retry(_write)
+
+
+def get_user_by_session_token(session_token: str, db_path: Path = _DB_PATH) -> UserRecord | None:
+    if not session_token:
+        return None
+    engine = get_engine(db_path)
+    with _DB_LOCK:
+        with engine.begin() as conn:
+            conn.execute(delete(user_sessions).where(user_sessions.c.expires_at <= _utcnow()))
+            row = conn.execute(
+                select(
+                    users.c.id,
+                    users.c.username,
+                    users.c.role,
+                    users.c.display_name,
+                    users.c.is_active,
+                    users.c.phone_number,
+                    users.c.phone_verified_at,
+                )
+                .select_from(user_sessions.join(users, users.c.id == user_sessions.c.user_id))
+                .where(
+                    user_sessions.c.session_token == session_token,
+                    user_sessions.c.expires_at > _utcnow(),
+                    users.c.is_active.is_(True),
+                )
+            ).mappings().first()
+    return _row_to_user(row) if row is not None else None
+
+
+def list_users(db_path: Path = _DB_PATH) -> list[UserRecord]:
+    rows = _fetch_all(
+        select(
+            users.c.id,
+            users.c.username,
+            users.c.role,
+            users.c.display_name,
+            users.c.is_active,
+            users.c.phone_number,
+            users.c.phone_verified_at,
+        ).order_by(users.c.role.desc(), users.c.created_at.asc(), users.c.id.asc()),
+        db_path=db_path,
+    )
+    return [_row_to_user(row) for row in rows]
+
+
+def list_user_usage_stats(db_path: Path = _DB_PATH) -> list[UserUsageRecord]:
+    rows = _fetch_all(
+        select(
+            users.c.id,
+            users.c.username,
+            users.c.role,
+            users.c.display_name,
+            users.c.is_active,
+            users.c.phone_number,
+            users.c.phone_verified_at,
+            func.count(func.distinct(libraries.c.id)).label("library_count"),
+            func.count(func.distinct(clips.c.id)).label("clip_count"),
+            func.count(func.distinct(recycled_clips.c.clip_id)).label("recycled_clip_count"),
+            func.coalesce(func.sum(func.length(clips.c.filepath)), 0).label("path_length_sum"),
+            func.count(func.distinct(user_sessions.c.id)).label("active_session_count"),
+        )
+        .select_from(
+            users.outerjoin(libraries, libraries.c.owner_user_id == users.c.id)
+            .outerjoin(clips, clips.c.library_id == libraries.c.id)
+            .outerjoin(recycled_clips, recycled_clips.c.clip_id == clips.c.id)
+            .outerjoin(
+                user_sessions,
+                and_(
+                    user_sessions.c.user_id == users.c.id,
+                    user_sessions.c.expires_at > _utcnow(),
+                ),
+            )
+        )
+        .group_by(
+            users.c.id,
+            users.c.username,
+            users.c.role,
+            users.c.display_name,
+            users.c.is_active,
+            users.c.phone_number,
+            users.c.phone_verified_at,
+        )
+        .order_by(users.c.role.desc(), users.c.id.asc()),
+        db_path=db_path,
+    )
+    usage_records: list[UserUsageRecord] = []
+    for row in rows:
+        user = _row_to_user(row)
+        usage_records.append(
+            UserUsageRecord(
+                user=user,
+                library_count=int(row["library_count"] or 0),
+                clip_count=int(row["clip_count"] or 0),
+                recycled_clip_count=int(row["recycled_clip_count"] or 0),
+                total_storage_bytes=0,
+                active_session_count=int(row["active_session_count"] or 0),
+            )
+        )
+    return usage_records
+
+
+def get_admin_dashboard_stats(db_path: Path = _DB_PATH) -> dict[str, Any]:
+    usage_records = list_user_usage_stats(db_path)
+    total_users = len(usage_records)
+    total_admins = sum(1 for item in usage_records if item.user.role == "admin")
+    total_sessions = sum(item.active_session_count for item in usage_records)
+    total_libraries = sum(item.library_count for item in usage_records)
+    total_clips = sum(item.clip_count for item in usage_records)
+    total_recycled = sum(item.recycled_clip_count for item in usage_records)
+    return {
+        "total_users": total_users,
+        "total_admins": total_admins,
+        "active_sessions": total_sessions,
+        "total_libraries": total_libraries,
+        "total_clips": total_clips,
+        "total_recycled_clips": total_recycled,
+        "user_usage": usage_records,
+    }

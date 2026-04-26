@@ -1,0 +1,21 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: reelsift-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: reelsift
+      POSTGRES_USER: reelsift
+      POSTGRES_PASSWORD: reelsift
+    ports:
+      - "5432:5432"
+    volumes:
+      - reelsift-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U reelsift -d reelsift"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  reelsift-postgres-data:
