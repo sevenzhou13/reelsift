@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import base64
+import difflib
 import hashlib
 import hmac
 import re
@@ -88,6 +89,17 @@ class TranscriptRecord:
     end_ms: int
     text: str
     segment_index: int
+
+
+@dataclass
+class ClipCutSegmentRecord:
+    id: int
+    clip_id: int
+    name: str
+    start_ms: int
+    end_ms: int
+    note: str | None = None
+    exported_path: Path | None = None
 
 
 @dataclass
@@ -223,6 +235,8 @@ clips = Table(
     Column("comparison_scores_json", Text),
     Column("comparison_error_message", Text),
     Column("user_note", Text),
+    Column("is_favorite", Boolean, nullable=False, default=False),
+    Column("rating", Integer, nullable=False, default=0),
     Column("created_at", DateTime, nullable=False),
     Column("updated_at", DateTime, nullable=False),
 )
@@ -245,6 +259,20 @@ transcripts = Table(
     Column("end_ms", Integer, nullable=False),
     Column("text", Text, nullable=False),
     Column("segment_index", Integer, nullable=False),
+)
+
+clip_cut_segments = Table(
+    "clip_cut_segments",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("clip_id", Integer, ForeignKey("clips.id", ondelete="CASCADE"), nullable=False),
+    Column("name", String(255), nullable=False, default="未命名片段"),
+    Column("start_ms", Integer, nullable=False),
+    Column("end_ms", Integer, nullable=False),
+    Column("note", Text),
+    Column("exported_path", Text),
+    Column("created_at", DateTime, nullable=False),
+    Column("updated_at", DateTime, nullable=False),
 )
 
 project_nodes = Table(
@@ -446,6 +474,8 @@ def _ensure_legacy_columns(conn: Connection) -> None:
         "comparison_scores_json": "ALTER TABLE clips ADD COLUMN comparison_scores_json TEXT",
         "comparison_error_message": "ALTER TABLE clips ADD COLUMN comparison_error_message TEXT",
         "user_note": "ALTER TABLE clips ADD COLUMN user_note TEXT",
+        "is_favorite": "ALTER TABLE clips ADD COLUMN is_favorite BOOLEAN NOT NULL DEFAULT 0",
+        "rating": "ALTER TABLE clips ADD COLUMN rating INTEGER NOT NULL DEFAULT 0",
     }
     for column_name, ddl in statements.items():
         if column_name not in existing:
@@ -455,6 +485,11 @@ def _ensure_legacy_columns(conn: Connection) -> None:
         library_columns = _column_names(conn, "libraries")
         if "owner_user_id" not in library_columns:
             conn.execute(text("ALTER TABLE libraries ADD COLUMN owner_user_id INTEGER"))
+
+    if _table_exists(conn, "clip_cut_segments"):
+        cut_columns = _column_names(conn, "clip_cut_segments")
+        if "name" not in cut_columns:
+            conn.execute(text("ALTER TABLE clip_cut_segments ADD COLUMN name TEXT NOT NULL DEFAULT '未命名片段'"))
 
 
 def _normalize_project_roots_locked(conn: Connection) -> None:
@@ -1225,6 +1260,196 @@ def update_clip_note(
     _with_retry(_write)
 
 
+def update_clip_review(
+    clip_id: int,
+    *,
+    is_favorite: bool | None = None,
+    rating: int | None = None,
+    db_path: Path = _DB_PATH,
+) -> None:
+    """更新素材的人工收藏和等级。"""
+    values: dict[str, Any] = {"updated_at": _utcnow()}
+    if is_favorite is not None:
+        values["is_favorite"] = bool(is_favorite)
+    if rating is not None:
+        values["rating"] = max(0, min(int(rating), 5))
+    if len(values) == 1:
+        return
+
+    engine = get_engine(db_path)
+
+    def _write() -> None:
+        with _DB_LOCK:
+            with engine.begin() as conn:
+                result = conn.execute(update(clips).where(clips.c.id == clip_id).values(**values))
+                if result.rowcount == 0:
+                    raise ValueError("素材不存在")
+
+    _with_retry(_write)
+
+
+def list_clip_cut_segments(clip_id: int, db_path: Path = _DB_PATH) -> list[ClipCutSegmentRecord]:
+    rows = _fetch_all(
+        select(
+            clip_cut_segments.c.id,
+            clip_cut_segments.c.clip_id,
+            clip_cut_segments.c.name,
+            clip_cut_segments.c.start_ms,
+            clip_cut_segments.c.end_ms,
+            clip_cut_segments.c.note,
+            clip_cut_segments.c.exported_path,
+        )
+        .where(clip_cut_segments.c.clip_id == clip_id)
+        .order_by(clip_cut_segments.c.start_ms.asc(), clip_cut_segments.c.id.asc()),
+        db_path=db_path,
+    )
+    return [
+        ClipCutSegmentRecord(
+            id=int(row["id"]),
+            clip_id=int(row["clip_id"]),
+            name=str(row.get("name") or "未命名片段"),
+            start_ms=int(row["start_ms"]),
+            end_ms=int(row["end_ms"]),
+            note=str(row["note"]) if row.get("note") else None,
+            exported_path=Path(str(row["exported_path"])) if row.get("exported_path") else None,
+        )
+        for row in rows
+    ]
+
+
+def get_clip_cut_segment(segment_id: int, db_path: Path = _DB_PATH) -> ClipCutSegmentRecord | None:
+    row = _fetch_one(
+        select(
+            clip_cut_segments.c.id,
+            clip_cut_segments.c.clip_id,
+            clip_cut_segments.c.name,
+            clip_cut_segments.c.start_ms,
+            clip_cut_segments.c.end_ms,
+            clip_cut_segments.c.note,
+            clip_cut_segments.c.exported_path,
+        ).where(clip_cut_segments.c.id == segment_id),
+        db_path=db_path,
+    )
+    if row is None:
+        return None
+    return ClipCutSegmentRecord(
+        id=int(row["id"]),
+        clip_id=int(row["clip_id"]),
+        name=str(row.get("name") or "未命名片段"),
+        start_ms=int(row["start_ms"]),
+        end_ms=int(row["end_ms"]),
+        note=str(row["note"]) if row.get("note") else None,
+        exported_path=Path(str(row["exported_path"])) if row.get("exported_path") else None,
+    )
+
+
+def create_clip_cut_segment(
+    clip_id: int,
+    name: str,
+    start_ms: int,
+    end_ms: int,
+    note: str,
+    db_path: Path = _DB_PATH,
+) -> ClipCutSegmentRecord:
+    if start_ms < 0:
+        raise ValueError("入点不能小于 0")
+    if end_ms <= start_ms:
+        raise ValueError("出点必须晚于入点")
+
+    cleaned_name = name.strip() or "未命名片段"
+    cleaned_note = note.strip()
+    engine = get_engine(db_path)
+
+    def _write() -> int:
+        with _DB_LOCK:
+            with engine.begin() as conn:
+                clip_row = conn.execute(select(clips.c.id).where(clips.c.id == clip_id)).first()
+                if clip_row is None:
+                    raise ValueError("素材不存在")
+                now = _utcnow()
+                result = conn.execute(
+                    insert(clip_cut_segments).values(
+                        clip_id=clip_id,
+                        name=cleaned_name,
+                        start_ms=start_ms,
+                        end_ms=end_ms,
+                        note=cleaned_note or None,
+                        exported_path=None,
+                        created_at=now,
+                        updated_at=now,
+                    )
+                )
+                return int(result.inserted_primary_key[0])
+
+    segment_id = _with_retry(_write)
+    segment = get_clip_cut_segment(segment_id, db_path)
+    if segment is None:
+        raise ValueError("粗剪片段创建失败")
+    return segment
+
+
+def delete_clip_cut_segment(segment_id: int, db_path: Path = _DB_PATH) -> None:
+    engine = get_engine(db_path)
+
+    def _write() -> None:
+        with _DB_LOCK:
+            with engine.begin() as conn:
+                result = conn.execute(delete(clip_cut_segments).where(clip_cut_segments.c.id == segment_id))
+                if result.rowcount == 0:
+                    raise ValueError("粗剪片段不存在")
+
+    _with_retry(_write)
+
+
+def update_clip_cut_segment_range(
+    segment_id: int,
+    start_ms: int,
+    end_ms: int,
+    db_path: Path = _DB_PATH,
+) -> None:
+    """更新粗剪片段的入点和出点。"""
+    if start_ms < 0:
+        raise ValueError("入点不能小于 0")
+    if end_ms <= start_ms:
+        raise ValueError("出点必须晚于入点")
+
+    engine = get_engine(db_path)
+
+    def _write() -> None:
+        with _DB_LOCK:
+            with engine.begin() as conn:
+                result = conn.execute(
+                    update(clip_cut_segments)
+                    .where(clip_cut_segments.c.id == segment_id)
+                    .values(start_ms=start_ms, end_ms=end_ms, updated_at=_utcnow())
+                )
+                if result.rowcount == 0:
+                    raise ValueError("粗剪片段不存在")
+
+    _with_retry(_write)
+
+
+def update_clip_cut_segment_export_path(
+    segment_id: int,
+    exported_path: Path,
+    db_path: Path = _DB_PATH,
+) -> None:
+    engine = get_engine(db_path)
+
+    def _write() -> None:
+        with _DB_LOCK:
+            with engine.begin() as conn:
+                result = conn.execute(
+                    update(clip_cut_segments)
+                    .where(clip_cut_segments.c.id == segment_id)
+                    .values(exported_path=str(exported_path), updated_at=_utcnow())
+                )
+                if result.rowcount == 0:
+                    raise ValueError("粗剪片段不存在")
+
+    _with_retry(_write)
+
+
 def list_project_nodes(library_id: int, db_path: Path = _DB_PATH) -> list[ProjectNodeRecord]:
     node_rows = _fetch_all(
         select(
@@ -1686,11 +1911,53 @@ def count_uncategorized_clips(library_id: int, db_path: Path = _DB_PATH) -> int:
     return int(row["count"] or 0) if row is not None else 0
 
 
+def _normalize_search_text(value: Any) -> str:
+    """把搜索文本归一化，兼顾中英文和符号。"""
+    return re.sub(r"\s+", " ", str(value or "").lower()).strip()
+
+
+def _score_text_match(query: str, target: str) -> float:
+    if not query or not target:
+        return 0.0
+    if query in target:
+        return 1.0
+    query_tokens = [item for item in re.split(r"[\s,，、/|]+", query) if item]
+    if query_tokens:
+        token_hits = sum(1 for item in query_tokens if item in target)
+        token_score = token_hits / len(query_tokens)
+    else:
+        token_score = 0.0
+    char_score = len(set(query) & set(target)) / max(len(set(query)), 1)
+    sequence_score = difflib.SequenceMatcher(None, query, target[: max(len(query) * 4, 24)]).ratio()
+    return max(token_score, char_score * 0.72, sequence_score * 0.78)
+
+
+def _score_clip_search(row: RowMapping, tags: list[str], query: str) -> float:
+    """按多字段综合计算本地模糊搜索分数。"""
+    normalized_query = _normalize_search_text(query)
+    if not normalized_query:
+        return 0.0
+    weighted_targets = [
+        (row["summary"], 4.0),
+        (" ".join(tags), 3.5),
+        (row["filename"], 2.4),
+        (row["scene"], 2.0),
+        (" ".join(row["subjects_json"] or []), 1.8),
+        (" ".join(row["actions_json"] or []), 1.8),
+    ]
+    score = 0.0
+    for target, weight in weighted_targets:
+        score += _score_text_match(normalized_query, _normalize_search_text(target)) * weight
+    return score
+
+
 def query_clips(
     *,
     library_id: int,
     query: str = "",
     tag: str = "",
+    favorite_only: bool = False,
+    min_rating: int = 0,
     include_failed: bool = False,
     node_id: int | None = None,
     uncategorized_node_id: int | None = None,
@@ -1702,6 +1969,10 @@ def query_clips(
     ]
     if not include_failed:
         filters.append(clips.c.status == "done")
+    if favorite_only:
+        filters.append(clips.c.is_favorite.is_(True))
+    if min_rating > 0:
+        filters.append(clips.c.rating >= max(1, min(int(min_rating), 5)))
 
     if node_id is not None:
         if uncategorized_node_id is not None and node_id == uncategorized_node_id:
@@ -1730,24 +2001,6 @@ def query_clips(
                     )
                 )
             )
-
-    if query:
-        like_query = f"%{query}%"
-        filters.append(
-            or_(
-                clips.c.filename.like(like_query),
-                clips.c.summary.like(like_query),
-                clips.c.scene.like(like_query),
-                exists(
-                    select(literal(1))
-                    .select_from(clip_tags)
-                    .where(
-                        clip_tags.c.clip_id == clips.c.id,
-                        clip_tags.c.tag.like(like_query),
-                    )
-                ),
-            )
-        )
 
     if tag:
         filters.append(
@@ -1780,6 +2033,8 @@ def query_clips(
             clips.c.comparison_status,
             clips.c.comparison_scores_json,
             clips.c.comparison_error_message,
+            clips.c.is_favorite,
+            clips.c.rating,
         )
         .select_from(clips.outerjoin(recycled_clips, recycled_clips.c.clip_id == clips.c.id))
         .where(and_(*filters))
@@ -1793,15 +2048,22 @@ def query_clips(
     items: list[dict[str, Any]] = []
     for row in rows:
         clip_id = int(row["id"])
+        row_tags = tag_map.get(clip_id, [])
+        search_score = _score_clip_search(row, row_tags, query)
+        if query and search_score < 0.34:
+            continue
         items.append(
             {
                 **dict(row),
                 "subjects_json": list(row["subjects_json"] or []),
                 "actions_json": list(row["actions_json"] or []),
-                "tags": tag_map.get(clip_id, []),
+                "tags": row_tags,
                 "folder_names": folder_map.get(clip_id, []),
+                "search_score": search_score,
             }
         )
+    if query:
+        items.sort(key=lambda item: float(item.get("search_score") or 0.0), reverse=True)
     return items
 
 
@@ -1828,6 +2090,8 @@ def query_clip_card(clip_id: int, db_path: Path = _DB_PATH) -> dict[str, Any] | 
             clips.c.comparison_status,
             clips.c.comparison_scores_json,
             clips.c.comparison_error_message,
+            clips.c.is_favorite,
+            clips.c.rating,
         ).where(clips.c.id == clip_id),
         db_path=db_path,
     )
@@ -1915,6 +2179,7 @@ def query_clip_detail(clip_id: int, db_path: Path = _DB_PATH) -> dict[str, Any] 
 
 def query_similar_clips(
     current_clip_id: int,
+    library_id: int,
     scene: str,
     limit: int = 3,
     db_path: Path = _DB_PATH,
@@ -1942,7 +2207,14 @@ def query_similar_clips(
             clips.c.comparison_scores_json,
             clips.c.comparison_error_message,
         )
-        .where(clips.c.id != current_clip_id, clips.c.scene == scene)
+        .select_from(clips.outerjoin(recycled_clips, recycled_clips.c.clip_id == clips.c.id))
+        .where(
+            clips.c.id != current_clip_id,
+            clips.c.library_id == library_id,
+            clips.c.scene == scene,
+            clips.c.status == "done",
+            recycled_clips.c.clip_id.is_(None),
+        )
         .order_by(clips.c.updated_at.desc(), clips.c.id.desc())
         .limit(limit),
         db_path=db_path,

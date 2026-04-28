@@ -12,6 +12,8 @@ os.environ["PATH"] = os.environ.get("PATH", "") + ":/opt/homebrew/bin:/usr/local
 # 支持的视频扩展名（统一转小写比较）
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm"}
 FRAME_EXTENSIONS = (".png", ".jpg", ".jpeg")
+KEYFRAME_POSITIONS = (0.10, 0.25, 0.40, 0.55, 0.70, 0.85)
+KEYFRAME_MAX_WIDTH = 480
 
 
 def scan_folder(folder: Path) -> list[Path]:
@@ -40,6 +42,59 @@ def get_keyframe_paths(frame_dir: Path, count: int = 6) -> list[Path]:
     return frame_paths
 
 
+def get_video_duration(video_path: Path) -> float:
+    """读取视频时长，返回秒数。"""
+    probe = ffmpeg.probe(str(video_path))
+    return float(probe["format"]["duration"])
+
+
+def clear_numbered_keyframes(frame_dir: Path, count: int) -> None:
+    """清理编号关键帧，避免失败重试时混入旧文件。"""
+    for index in range(count):
+        for suffix in FRAME_EXTENSIONS:
+            candidate = frame_dir / f"{index}{suffix}"
+            if candidate.exists():
+                candidate.unlink()
+
+
+def extract_keyframes_fast(video_path: Path, frame_dir: Path, duration: float, count: int) -> None:
+    """用单个 ffmpeg 进程按多个位置抽取关键帧。"""
+    positions = [duration * percent for percent in KEYFRAME_POSITIONS[:count]]
+    outputs = []
+    for index, position in enumerate(positions):
+        stream = ffmpeg.input(str(video_path), ss=position)
+        stream = stream.filter("scale", f"min({KEYFRAME_MAX_WIDTH},iw)", -2)
+        outputs.append(
+            stream.output(
+                str(frame_dir / f"{index}.png"),
+                vframes=1,
+            )
+        )
+
+    ffmpeg.merge_outputs(*outputs).overwrite_output().run(quiet=True)
+
+    if len(get_keyframe_paths(frame_dir, count)) < count:
+        raise RuntimeError("快速抽帧没有生成足够关键帧")
+
+
+def extract_keyframes_slow(video_path: Path, frame_dir: Path, duration: float, count: int) -> None:
+    """逐帧 seek 抽取关键帧，作为兼容回退。"""
+    positions = [duration * percent for percent in KEYFRAME_POSITIONS[:count]]
+    for index, position in enumerate(positions):
+        out_path = frame_dir / f"{index}.png"
+        stream = ffmpeg.input(str(video_path), ss=position)
+        stream = stream.filter("scale", f"min({KEYFRAME_MAX_WIDTH},iw)", -2)
+        (
+            stream
+            .output(
+                str(out_path),
+                vframes=1,
+            )
+            .overwrite_output()
+            .run(quiet=True)
+        )
+
+
 def extract_keyframes(
     video_path: Path,
     cache_dir: Path,
@@ -61,24 +116,12 @@ def extract_keyframes(
 
     frame_dir.mkdir(parents=True, exist_ok=True)
 
-    # 获取视频时长（秒）
-    probe = ffmpeg.probe(str(video_path))
-    duration = float(probe["format"]["duration"])
-
-    # 抽帧位置：均匀分布在 10%~85% 之间，避开首尾
-    positions = [duration * p for p in [0.10, 0.25, 0.40, 0.55, 0.70, 0.85]][:count]
-
-    for i, t in enumerate(positions):
-        out_path = frame_dir / f"{i}.png"
-        stream = ffmpeg.input(str(video_path), ss=t)
-        (
-            stream
-            .output(
-                str(out_path),
-                vframes=1,
-            )
-            .overwrite_output()
-            .run(quiet=True)
-        )
+    duration = get_video_duration(video_path)
+    clear_numbered_keyframes(frame_dir, count)
+    try:
+        extract_keyframes_fast(video_path, frame_dir, duration, count)
+    except Exception:
+        clear_numbered_keyframes(frame_dir, count)
+        extract_keyframes_slow(video_path, frame_dir, duration, count)
 
     return video_hash, frame_dir

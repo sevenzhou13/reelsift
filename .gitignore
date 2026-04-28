@@ -4,6 +4,7 @@ test-video/
 .venv/
 .vendor/
 __pycache__/
+.pycache/
 *.pyc
 *.pyo
 .DS_Store

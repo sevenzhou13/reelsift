@@ -6,6 +6,8 @@ import json
 import mimetypes
 import re
 import shutil
+import subprocess
+import sys
 import threading
 import time
 import uuid
@@ -24,6 +26,7 @@ from fastapi.templating import Jinja2Templates
 from ai import analyze_video
 from asr import ASREmptyResult, ASRError, is_asr_configured, transcribe_video
 from db import (
+    ClipCutSegmentRecord,
     ClipRecord,
     LibraryRecord,
     ProjectNodeRecord,
@@ -38,13 +41,16 @@ from db import (
     create_session,
     create_user,
     count_uncategorized_clips as db_count_uncategorized_clips,
+    create_clip_cut_segment,
     create_library,
     create_project_node,
     delete_session,
+    delete_clip_cut_segment,
     delete_clips,
     delete_library,
     delete_project_node,
     get_admin_dashboard_stats,
+    get_clip_cut_segment,
     get_library_by_id,
     get_library_by_name,
     get_project_node,
@@ -53,6 +59,7 @@ from db import (
     issue_phone_verification_code,
     init_db,
     list_libraries,
+    list_clip_cut_segments,
     list_project_nodes,
     list_recycled_clips,
     list_users,
@@ -76,7 +83,10 @@ from db import (
     move_project_node,
     move_clip_to_node,
     update_clip_asset_state as db_update_clip_asset_state,
+    update_clip_cut_segment_export_path,
+    update_clip_cut_segment_range,
     update_clip_note,
+    update_clip_review,
     update_clip_transcript_state as db_update_clip_transcript_state,
     update_clip_summary,
 )
@@ -85,7 +95,57 @@ from pipeline import VIDEO_EXTENSIONS, build_video_hash, extract_keyframes, get_
 
 
 BASE_DIR = Path(__file__).parent
-DB_PATH = BASE_DIR / "data" / "reelsift.db"
+DB_PATH  = BASE_DIR / "data" / "reelsift.db"
+
+# Swift 文件夹选择器：编译一次后缓存二进制，避免每次点击都重新编译
+_PICKER_BIN  = BASE_DIR / "data" / ".pick_folder_bin"
+_PICKER_LOCK = threading.Lock()
+_PICKER_MODULE_CACHE = BASE_DIR / "data" / ".swift_module_cache"
+_SWIFT_PICKER_SRC = """\
+import AppKit
+let app = NSApplication.shared
+app.setActivationPolicy(.accessory)
+app.activate(ignoringOtherApps: true)
+let panel = NSOpenPanel()
+panel.canChooseFiles = false
+panel.canChooseDirectories = true
+panel.allowsMultipleSelection = false
+panel.title = "选择导出目录"
+panel.prompt = "选择此文件夹"
+let resp = panel.runModal()
+if resp == .OK, let url = panel.url { print(url.path, terminator: "") }
+"""
+
+def _ensure_picker_binary() -> tuple[Path | None, str | None]:
+    """编译 Swift 文件夹选择器，编译成功后缓存二进制。"""
+    if _PICKER_BIN.exists():
+        return _PICKER_BIN, None
+    with _PICKER_LOCK:
+        if _PICKER_BIN.exists():
+            return _PICKER_BIN, None
+        _PICKER_BIN.parent.mkdir(parents=True, exist_ok=True)
+        _PICKER_MODULE_CACHE.mkdir(parents=True, exist_ok=True)
+        src = _PICKER_BIN.with_suffix(".swift")
+        try:
+            src.write_text(_SWIFT_PICKER_SRC)
+            r = subprocess.run(
+                [
+                    "swiftc",
+                    "-module-cache-path",
+                    str(_PICKER_MODULE_CACHE),
+                    str(src),
+                    "-o",
+                    str(_PICKER_BIN),
+                ],
+                capture_output=True, text=True, timeout=120,
+            )
+            if r.returncode != 0 or not _PICKER_BIN.exists():
+                return None, (r.stderr or r.stdout or "Swift 文件夹选择器编译失败").strip()
+            return _PICKER_BIN, None
+        except Exception as exc:
+            return None, str(exc)
+        finally:
+            src.unlink(missing_ok=True)
 TEMPLATES_DIR = BASE_DIR / "templates"
 STATIC_DIR = BASE_DIR / "static"
 PICKS_DIR = BASE_DIR / "data" / "picks"
@@ -127,6 +187,9 @@ class ClipCard:
     comparison_status: str = "pending"
     comparison_error_message: str | None = None
     folder_label: str = "未分类"
+    is_favorite: bool = False
+    rating: int = 0
+    search_score: float = 0.0
 
 
 @dataclass
@@ -194,6 +257,10 @@ app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 app.mount("/data", StaticFiles(directory=BASE_DIR / "data"), name="data")
 templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
 init_db(DB_PATH)
+
+# 服务启动时在后台预编译 Swift 文件夹选择器，第一次点击"浏览"时就不需要等待编译
+if sys.platform == "darwin":
+    threading.Thread(target=_ensure_picker_binary, daemon=True).start()
 
 UPLOAD_JOBS: dict[str, UploadJobState] = {}
 UPLOAD_LOCK = threading.Lock()
@@ -410,6 +477,63 @@ def format_timestamp(ms: int) -> str:
     return f"{minutes:02d}:{seconds:02d}"
 
 
+def format_duration_ms(ms: int) -> str:
+    """把毫秒时长转成适合粗剪面板展示的文本。"""
+    total_seconds = max(ms // 1000, 0)
+    minutes = total_seconds // 60
+    seconds = total_seconds % 60
+    return f"{minutes}分{seconds:02d}秒" if minutes else f"{seconds}秒"
+
+
+def parse_timecode_ms(value: str) -> int:
+    """解析 mm:ss、hh:mm:ss 或纯秒数为毫秒。"""
+    cleaned = value.strip()
+    if not cleaned:
+        raise ValueError("请填写时间点")
+    if re.fullmatch(r"\d+(\.\d+)?", cleaned):
+        return int(float(cleaned) * 1000)
+
+    parts = cleaned.split(":")
+    if len(parts) not in {2, 3}:
+        raise ValueError("时间格式请使用 mm:ss、hh:mm:ss 或秒数")
+    try:
+        numbers = [float(part) for part in parts]
+    except ValueError as exc:
+        raise ValueError("时间格式请使用数字") from exc
+    if any(number < 0 for number in numbers):
+        raise ValueError("时间点不能为负数")
+    if len(numbers) == 2:
+        minutes, seconds = numbers
+        total_seconds = minutes * 60 + seconds
+    else:
+        hours, minutes, seconds = numbers
+        total_seconds = hours * 3600 + minutes * 60 + seconds
+    return int(total_seconds * 1000)
+
+
+def build_cut_segment_view(segment: ClipCutSegmentRecord) -> dict[str, Any]:
+    """构造详情页粗剪片段展示数据。"""
+    exported_url = build_data_url_from_path(str(segment.exported_path)) if segment.exported_path else None
+    return {
+        "id": segment.id,
+        "clip_id": segment.clip_id,
+        "name": segment.name,
+        "start_ms": segment.start_ms,
+        "end_ms": segment.end_ms,
+        "start_text": format_timestamp(segment.start_ms),
+        "end_text": format_timestamp(segment.end_ms),
+        "duration_text": format_duration_ms(segment.end_ms - segment.start_ms),
+        "note": segment.note,
+        "exported_path": str(segment.exported_path) if segment.exported_path else None,
+        "exported_url": exported_url,
+    }
+
+
+def load_cut_segments(clip_id: int) -> list[dict[str, Any]]:
+    """读取详情页粗剪片段列表。"""
+    return [build_cut_segment_view(segment) for segment in list_clip_cut_segments(clip_id, DB_PATH)]
+
+
 def build_transcript_context(segments: list[TranscriptSegment]) -> str:
     """把 transcript 分段拼成适合摘要生成的上下文文本。"""
     if not segments:
@@ -421,6 +545,24 @@ def build_transcript_context(segments: list[TranscriptSegment]) -> str:
         if not item.text.strip():
             continue
         if total_length + len(line) > 500:
+            break
+        lines.append(line)
+        total_length += len(line)
+    return "\n".join(lines)
+
+
+def build_saved_transcript_context(transcripts: list[dict[str, Any]]) -> str:
+    """把已入库 transcript 拼成适合重新生成摘要的上下文。"""
+    if not transcripts:
+        return ""
+    lines: list[str] = []
+    total_length = 0
+    for item in transcripts:
+        text = str(item.get("text") or "").strip()
+        if not text:
+            continue
+        line = f"{format_timestamp(int(item.get('start_ms') or 0))} {text}"
+        if total_length + len(line) > 900:
             break
         lines.append(line)
         total_length += len(line)
@@ -519,7 +661,7 @@ def clamp_score(value: float, *, minimum: float = 0.0, maximum: float = 100.0) -
     return max(minimum, min(maximum, value))
 
 
-def build_compare_payload(clip: ClipDetail) -> dict[str, Any]:
+def build_compare_payload(request: Request, clip: ClipDetail) -> dict[str, Any]:
     """构造相似素材对比页的单条评分数据。"""
     frame_dir = CACHE_DIR / build_video_hash(Path(clip.filepath))
     frame_paths = get_keyframe_paths(frame_dir)
@@ -562,14 +704,14 @@ def build_compare_payload(clip: ClipDetail) -> dict[str, Any]:
     }
 
 
-def load_compare_payloads(clip_ids: list[int]) -> list[dict[str, Any]]:
+def load_compare_payloads(request: Request, clip_ids: list[int]) -> list[dict[str, Any]]:
     """读取对比页需要的素材与评分。"""
     payloads: list[dict[str, Any]] = []
     for clip_id in clip_ids[:6]:
         clip = load_clip_detail(clip_id)
         if clip is None:
             continue
-        payloads.append(build_compare_payload(clip))
+        payloads.append(build_compare_payload(request, clip))
     payloads.sort(key=lambda item: item["overall_score"], reverse=True)
     for index, item in enumerate(payloads, start=1):
         item["rank"] = index
@@ -622,6 +764,9 @@ def build_clip_card_from_row(row: dict[str, Any]) -> ClipCard:
         comparison_scores=json.loads(comparison_scores_json) if comparison_scores_json else None,
         comparison_error_message=row.get("comparison_error_message"),
         folder_label=folder_names[0] if folder_names else "未分类",
+        is_favorite=bool(row.get("is_favorite")),
+        rating=int(row.get("rating") or 0),
+        search_score=float(row.get("search_score") or 0.0),
     )
 
 
@@ -629,6 +774,8 @@ def load_clips(
     request: Request,
     query: str = "",
     tag: str = "",
+    favorite_only: bool = False,
+    min_rating: int = 0,
     include_failed: bool = False,
     library_id: int | None = None,
     node_id: int | None = None,
@@ -640,6 +787,8 @@ def load_clips(
         library_id=current_library_id,
         query=query.strip(),
         tag=tag.strip(),
+        favorite_only=favorite_only,
+        min_rating=min_rating,
         include_failed=include_failed,
         node_id=node_id,
         uncategorized_node_id=current_uncategorized_id,
@@ -737,9 +886,9 @@ def load_clip_detail(clip_id: int) -> ClipDetail | None:
     )
 
 
-def load_similar_clips(current_clip_id: int, scene: str, limit: int = 3) -> list[ClipCard]:
+def load_similar_clips(current_clip_id: int, library_id: int, scene: str, limit: int = 3) -> list[ClipCard]:
     """按相同场景读取相似素材，用于详情页侧边展示。"""
-    rows = query_similar_clips(current_clip_id, scene, limit=limit, db_path=DB_PATH)
+    rows = query_similar_clips(current_clip_id, library_id, scene, limit=limit, db_path=DB_PATH)
     return [build_clip_card_from_row(row) for row in rows]
 
 
@@ -1285,6 +1434,60 @@ def export_clips_by_ids(clip_ids: list[int], destination_input: str = "") -> dic
     }
 
 
+def build_cut_segment_export_path(clip: ClipDetail, segment: ClipCutSegmentRecord, export_dir: str = "") -> Path:
+    """生成粗剪片段导出路径。export_dir 非空时使用自定义目录。"""
+    if export_dir.strip():
+        destination_dir = Path(export_dir.strip()).expanduser().resolve()
+    else:
+        destination_dir = PICKS_DIR / "clips" / str(clip.id)
+    destination_dir.mkdir(parents=True, exist_ok=True)
+    base_name = sanitize_export_filename(segment.name or segment.note or clip.summary or Path(clip.filename).stem)
+    destination = destination_dir / f"{base_name}.mp4"
+    sequence = 2
+    while destination.exists():
+        destination = destination_dir / f"{base_name}-{sequence}.mp4"
+        sequence += 1
+    return destination
+
+
+def export_cut_segment(clip: ClipDetail, segment: ClipCutSegmentRecord, export_dir: str = "") -> Path:
+    """用 ffmpeg 导出粗剪片段，不覆盖原视频。"""
+    source = Path(clip.filepath)
+    if not source.exists():
+        raise ValueError("原始视频不存在，无法导出片段")
+
+    duration_seconds = max((segment.end_ms - segment.start_ms) / 1000.0, 0.01)
+    destination = build_cut_segment_export_path(clip, segment, export_dir=export_dir)
+    stream = ffmpeg.input(str(source), ss=segment.start_ms / 1000.0)
+    (
+        ffmpeg
+        .output(
+            stream,
+            str(destination),
+            t=duration_seconds,
+            vcodec="libx264",
+            acodec="aac",
+            pix_fmt="yuv420p",
+            movflags="+faststart",
+        )
+        .overwrite_output()
+        .run(quiet=True)
+    )
+    update_clip_cut_segment_export_path(segment.id, destination, DB_PATH)
+    return destination
+
+
+def build_cut_export_result(exported_path: Path) -> dict[str, Any]:
+    """构造粗剪导出完成面板需要的数据。"""
+    return {
+        "copied": 1,
+        "files": [exported_path.name],
+        "skipped": [],
+        "destination": str(exported_path.parent),
+        "message": "已导出 1 个粗剪片段",
+    }
+
+
 def parse_selected_ids(raw_selected_ids: list[str]) -> list[int]:
     """过滤表单里的空值，并把素材 ID 转成整数列表。"""
     selected_ids: list[int] = []
@@ -1297,6 +1500,55 @@ def parse_selected_ids(raw_selected_ids: list[str]) -> list[int]:
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=f"素材 ID 无效：{raw_value}") from exc
     return selected_ids
+
+
+@app.get("/api/pick-folder", include_in_schema=False)
+def pick_folder_dialog(request: Request):
+    """调起当前系统的原生文件夹选择对话框，返回用户选择的路径。"""
+    require_user(request)
+    if sys.platform.startswith("win"):
+        try:
+            import tkinter as tk
+            from tkinter import filedialog
+
+            root = tk.Tk()
+            root.withdraw()
+            root.attributes("-topmost", True)
+            selected_path = filedialog.askdirectory(title="选择导出目录", mustexist=True)
+            root.destroy()
+            return {
+                "path": selected_path.rstrip("\\/"),
+                "cancelled": not bool(selected_path),
+                "error": "",
+            }
+        except Exception as exc:
+            return {
+                "path": "",
+                "cancelled": True,
+                "error": f"Windows 文件夹选择器启动失败：{exc}",
+            }
+
+    if sys.platform != "darwin":
+        return {"path": "", "cancelled": True, "error": "当前系统暂不支持原生文件夹选择，请手动输入路径。"}
+
+    try:
+        picker, picker_error = _ensure_picker_binary()
+        if picker is None:
+            return {"path": "", "cancelled": True, "error": picker_error or "文件夹选择器不可用。"}
+        result = subprocess.run(
+            [str(picker)],
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+        if result.returncode != 0:
+            return {"path": "", "cancelled": True, "error": (result.stderr or "Finder 文件夹选择器启动失败。").strip()}
+        path = result.stdout.strip().rstrip("/")
+        return {"path": path, "cancelled": not bool(path), "error": ""}
+    except subprocess.TimeoutExpired:
+        return {"path": "", "cancelled": True, "error": "文件夹选择超时。"}
+    except Exception as exc:
+        return {"path": "", "cancelled": True, "error": str(exc)}
 
 
 @app.get("/login", include_in_schema=False)
@@ -1756,6 +2008,8 @@ def grid_page(
     request: Request,
     q: str = Query(default=""),
     tag: str = Query(default=""),
+    favorite: bool = Query(default=False),
+    rating: int = Query(default=0),
     library_id: Optional[int] = Query(default=None),
     node_id: Optional[int] = Query(default=None),
 ):
@@ -1766,6 +2020,8 @@ def grid_page(
         request,
         query=q.strip(),
         tag=tag.strip(),
+        favorite_only=favorite,
+        min_rating=rating,
         library_id=current_library_id,
         node_id=current_node_id,
     )
@@ -1781,6 +2037,8 @@ def grid_page(
             "all_tags": load_tags(request, current_library_id, current_node_id),
             "current_query": q.strip(),
             "current_tag": tag.strip(),
+            "current_favorite": favorite,
+            "current_rating": max(0, min(int(rating), 5)),
             "libraries": libraries,
             "current_library": current_library,
             "current_library_name": current_library.name if current_library else "素材库",
@@ -1809,6 +2067,7 @@ def build_clip_detail_context(
     clip_id: int,
     current_library_id: int,
     edit_error: str | None = None,
+    cut_error: str | None = None,
 ) -> dict[str, Any]:
     """构造详情页模板上下文。"""
     clip = require_accessible_clip(request, clip_id)
@@ -1818,12 +2077,35 @@ def build_clip_detail_context(
     return {
         **build_common_context(request),
         "clip": clip,
-        "similar_clips": load_similar_clips(clip.id, clip.scene),
+        "similar_clips": load_similar_clips(clip.id, current_library_id, clip.scene),
+        "cut_segments": load_cut_segments(clip.id),
         "return_url": f"/?library_id={current_library_id}",
         "current_library_id": current_library_id,
         "edit_error": edit_error,
+        "cut_error": cut_error,
         "previous_clip_id": previous_clip_id,
         "next_clip_id": next_clip_id,
+    }
+
+
+def build_clip_cut_context(
+    request: Request,
+    clip_id: int,
+    current_library_id: int,
+    cut_error: str | None = None,
+) -> dict[str, Any]:
+    """构造独立粗剪页模板上下文。"""
+    clip = require_accessible_clip(request, clip_id)
+    if clip is None:
+        raise HTTPException(status_code=404, detail="素材不存在。")
+    return {
+        **build_common_context(request),
+        "clip": clip,
+        "cut_segments": load_cut_segments(clip.id),
+        "return_url": f"/clips/{clip.id}?library_id={current_library_id}",
+        "library_url": f"/?library_id={current_library_id}",
+        "current_library_id": current_library_id,
+        "cut_error": cut_error,
     }
 
 
@@ -1836,6 +2118,18 @@ def clip_detail_page(request: Request, clip_id: int, library_id: Optional[int] =
         request=request,
         name="clip_detail.html",
         context=build_clip_detail_context(request, clip_id, current_library_id),
+    )
+
+
+@app.get("/clips/{clip_id}/cut", include_in_schema=False)
+def clip_cut_page(request: Request, clip_id: int, library_id: Optional[int] = Query(default=None)):
+    """渲染单条素材的独立粗剪页。"""
+    clip = require_accessible_clip(request, clip_id)
+    current_library_id = resolve_library_id(request, library_id or clip.library_id)
+    return templates.TemplateResponse(
+        request=request,
+        name="clip_cut.html",
+        context=build_clip_cut_context(request, clip_id, current_library_id),
     )
 
 
@@ -1853,7 +2147,7 @@ def compare_clips_page(
         raise HTTPException(status_code=400, detail="一次最多对比 6 条素材。")
 
     current_library_id = resolve_library_id(request, library_id)
-    payloads = [item for item in load_compare_payloads(clip_ids) if item["clip"].library_id == current_library_id]
+    payloads = [item for item in load_compare_payloads(request, clip_ids) if item["clip"].library_id == current_library_id]
     if len(payloads) < 2:
         raise HTTPException(status_code=400, detail="没有足够素材可用于对比。")
     for item in payloads:
@@ -1934,6 +2228,46 @@ def update_clip_summary_action(
     return RedirectResponse(url=f"/clips/{clip_id}?library_id={current_library_id}", status_code=303)
 
 
+@app.post("/clips/{clip_id}/summary/from-transcript", include_in_schema=False)
+def regenerate_clip_summary_from_transcript(
+    request: Request,
+    clip_id: int,
+    library_id: Optional[int] = Form(default=None),
+):
+    """结合已保存的口播转写重新生成摘要。"""
+    clip = require_accessible_clip(request, clip_id)
+    if clip is None:
+        raise HTTPException(status_code=404, detail="素材不存在。")
+    if not clip.transcripts:
+        raise HTTPException(status_code=400, detail="这条素材还没有可用口播。")
+
+    frame_dir = CACHE_DIR / build_video_hash(Path(clip.filepath))
+    frame_paths = get_keyframe_paths(frame_dir)
+    if not frame_paths:
+        raise HTTPException(status_code=400, detail="这条素材缺少关键帧，无法重新生成摘要。")
+
+    transcript_context = build_saved_transcript_context(clip.transcripts)
+    analysis = analyze_video(frame_paths, transcript_context)
+    try:
+        update_clip_summary(
+            clip_id=clip.id,
+            library_id=clip.library_id,
+            summary=analysis.summary,
+            db_path=DB_PATH,
+        )
+    except ValueError as exc:
+        current_library_id = resolve_library_id(request, library_id or clip.library_id)
+        return templates.TemplateResponse(
+            request=request,
+            name="clip_detail.html",
+            context=build_clip_detail_context(request, clip_id, current_library_id, str(exc)),
+            status_code=400,
+        )
+
+    current_library_id = resolve_library_id(request, library_id or clip.library_id)
+    return RedirectResponse(url=f"/clips/{clip_id}?library_id={current_library_id}", status_code=303)
+
+
 @app.post("/clips/{clip_id}/card-summary", include_in_schema=False)
 def update_clip_card_summary_action(
     request: Request,
@@ -1974,6 +2308,52 @@ def update_clip_card_summary_action(
             "project_tree": build_project_tree(current_library_id, resolve_node_id(current_library_id)),
             "card_error": card_error,
             "card_edit_open": edit_open,
+        },
+    )
+
+
+@app.post("/clips/{clip_id}/review", include_in_schema=False)
+def update_clip_review_action(
+    request: Request,
+    clip_id: int,
+    is_favorite: Optional[bool] = Form(default=None),
+    rating: Optional[int] = Form(default=None),
+    filter_favorite: bool = Form(default=False),
+    filter_rating: int = Form(default=0),
+    library_id: Optional[int] = Form(default=None),
+):
+    """更新素材卡片的收藏与人工等级，并返回卡片局部 HTML。"""
+    clip_detail = require_accessible_clip(request, clip_id)
+    if clip_detail is None:
+        raise HTTPException(status_code=404, detail="素材不存在。")
+
+    update_clip_review(
+        clip_id=clip_detail.id,
+        is_favorite=is_favorite,
+        rating=rating,
+        db_path=DB_PATH,
+    )
+    clip = load_clip_card(clip_id)
+    if clip is None:
+        raise HTTPException(status_code=404, detail="素材不存在。")
+    current_library_id = resolve_library_id(request, library_id or clip_detail.library_id)
+    current_filter_rating = max(0, min(int(filter_rating), 5))
+    if filter_favorite and not clip.is_favorite:
+        return Response(content="", media_type="text/html")
+    if current_filter_rating > 0 and clip.rating < current_filter_rating:
+        return Response(content="", media_type="text/html")
+    return templates.TemplateResponse(
+        request=request,
+        name="partials/clip_card.html",
+        context={
+            "clip": clip,
+            "current_library_id": current_library_id,
+            "current_library_name": get_library_by_id(current_library_id, DB_PATH).name if get_library_by_id(current_library_id, DB_PATH) else "素材库",
+            "project_tree": build_project_tree(current_library_id, resolve_node_id(current_library_id)),
+            "current_favorite": filter_favorite,
+            "current_rating": current_filter_rating,
+            "card_error": None,
+            "card_edit_open": False,
         },
     )
 
@@ -2048,6 +2428,114 @@ def update_clip_note_action(
 
     current_library_id = resolve_library_id(request, library_id or clip.library_id)
     return RedirectResponse(url=f"/clips/{clip_id}?library_id={current_library_id}", status_code=303)
+
+
+@app.post("/clips/{clip_id}/cut-segments", include_in_schema=False)
+def create_clip_cut_segment_action(
+    request: Request,
+    clip_id: int,
+    segment_name: str = Form(default=""),
+    start_time: str = Form(...),
+    end_time: str = Form(...),
+    note: str = Form(default=""),
+    library_id: Optional[int] = Form(default=None),
+):
+    """保存一段非破坏性粗剪片段。"""
+    clip = require_accessible_clip(request, clip_id)
+    current_library_id = resolve_library_id(request, library_id or clip.library_id)
+    try:
+        create_clip_cut_segment(
+            clip_id=clip.id,
+            name=segment_name,
+            start_ms=parse_timecode_ms(start_time),
+            end_ms=parse_timecode_ms(end_time),
+            note=note,
+            db_path=DB_PATH,
+        )
+    except ValueError as exc:
+        return templates.TemplateResponse(
+            request=request,
+            name="clip_cut.html",
+            context=build_clip_cut_context(request, clip_id, current_library_id, cut_error=str(exc)),
+            status_code=400,
+        )
+    return RedirectResponse(url=f"/clips/{clip_id}/cut?library_id={current_library_id}", status_code=303)
+
+
+@app.post("/clips/{clip_id}/cut-segments/{segment_id}/delete", include_in_schema=False)
+def delete_clip_cut_segment_action(
+    request: Request,
+    clip_id: int,
+    segment_id: int,
+    library_id: Optional[int] = Form(default=None),
+):
+    """删除一条粗剪片段标记，不删除原视频。"""
+    clip = require_accessible_clip(request, clip_id)
+    current_library_id = resolve_library_id(request, library_id or clip.library_id)
+    segment = get_clip_cut_segment(segment_id, DB_PATH)
+    if segment is None or segment.clip_id != clip.id:
+        raise HTTPException(status_code=404, detail="粗剪片段不存在。")
+    delete_clip_cut_segment(segment_id, DB_PATH)
+    return RedirectResponse(url=f"/clips/{clip_id}/cut?library_id={current_library_id}", status_code=303)
+
+
+@app.post("/clips/{clip_id}/cut-segments/{segment_id}/range", include_in_schema=False)
+def update_clip_cut_segment_range_action(
+    request: Request,
+    clip_id: int,
+    segment_id: int,
+    start_ms: int = Form(...),
+    end_ms: int = Form(...),
+    library_id: Optional[int] = Form(default=None),
+):
+    """更新粗剪片段的入点和出点。"""
+    clip = require_accessible_clip(request, clip_id)
+    current_library_id = resolve_library_id(request, library_id or clip.library_id)
+    segment = get_clip_cut_segment(segment_id, DB_PATH)
+    if segment is None or segment.clip_id != clip.id:
+        raise HTTPException(status_code=404, detail="粗剪片段不存在。")
+    try:
+        update_clip_cut_segment_range(segment_id, start_ms, end_ms, DB_PATH)
+    except ValueError as exc:
+        return templates.TemplateResponse(
+            request=request,
+            name="clip_cut.html",
+            context=build_clip_cut_context(request, clip_id, current_library_id, cut_error=str(exc)),
+            status_code=400,
+        )
+    return RedirectResponse(url=f"/clips/{clip_id}/cut?library_id={current_library_id}", status_code=303)
+
+
+@app.post("/clips/{clip_id}/cut-segments/{segment_id}/export", include_in_schema=False)
+def export_clip_cut_segment_action(
+    request: Request,
+    clip_id: int,
+    segment_id: int,
+    library_id: Optional[int] = Form(default=None),
+    export_dir: str = Form(default=""),
+):
+    """导出一条粗剪片段，支持自定义目标目录。"""
+    clip = require_accessible_clip(request, clip_id)
+    current_library_id = resolve_library_id(request, library_id or clip.library_id)
+    segment = get_clip_cut_segment(segment_id, DB_PATH)
+    if segment is None or segment.clip_id != clip.id:
+        raise HTTPException(status_code=404, detail="粗剪片段不存在。")
+    try:
+        exported_path = export_cut_segment(clip, segment, export_dir=export_dir.strip())
+    except Exception as exc:
+        return templates.TemplateResponse(
+            request=request,
+            name="clip_cut.html",
+            context=build_clip_cut_context(request, clip_id, current_library_id, cut_error=f"片段导出失败：{exc}"),
+            status_code=400,
+        )
+    if request.headers.get("X-Requested-With") == "XMLHttpRequest":
+        return templates.TemplateResponse(
+            request=request,
+            name="partials/export_panel.html",
+            context={"export_result": build_cut_export_result(exported_path)},
+        )
+    return RedirectResponse(url=f"/clips/{clip_id}/cut?library_id={current_library_id}", status_code=303)
 
 
 @app.post("/clips/{clip_id}/delete", include_in_schema=False)
@@ -2264,13 +2752,23 @@ def clips_partial(
     request: Request,
     q: str = Query(default=""),
     tag: str = Query(default=""),
+    favorite: bool = Query(default=False),
+    rating: int = Query(default=0),
     library_id: Optional[int] = Query(default=None),
     node_id: Optional[int] = Query(default=None),
 ):
     """返回素材网格局部 HTML，供 HTMX 刷新。"""
     current_library_id = resolve_library_id(request, library_id)
     current_node_id = resolve_node_id(current_library_id, node_id)
-    clips = load_clips(request, query=q.strip(), tag=tag.strip(), library_id=current_library_id, node_id=current_node_id)
+    clips = load_clips(
+        request,
+        query=q.strip(),
+        tag=tag.strip(),
+        favorite_only=favorite,
+        min_rating=rating,
+        library_id=current_library_id,
+        node_id=current_node_id,
+    )
     return templates.TemplateResponse(
         request=request,
         name="partials/clip_grid.html",
@@ -2279,6 +2777,8 @@ def clips_partial(
             "stats": build_stats(clips),
             "current_query": q.strip(),
             "current_tag": tag.strip(),
+            "current_favorite": favorite,
+            "current_rating": max(0, min(int(rating), 5)),
             "current_library_name": get_library_by_id(current_library_id, DB_PATH).name if get_library_by_id(current_library_id, DB_PATH) else "素材库",
             "current_library_id": current_library_id,
             "current_node_id": current_node_id,
@@ -2346,6 +2846,8 @@ def export_selected_clips(
     export_dir: str = Form(default=""),
     q: str = Form(default=""),
     tag: str = Form(default=""),
+    favorite: bool = Form(default=False),
+    rating: int = Form(default=0),
     library_id: Optional[int] = Form(default=None),
     node_id: Optional[int] = Form(default=None),
 ):
@@ -2353,13 +2855,23 @@ def export_selected_clips(
     export_result = export_clips_by_ids(parse_selected_ids(selected_ids), destination_input=export_dir)
     current_library_id = resolve_library_id(request, library_id)
     current_node_id = resolve_node_id(current_library_id, node_id)
-    clips = load_clips(request, query=q.strip(), tag=tag.strip(), library_id=current_library_id, node_id=current_node_id)
+    clips = load_clips(
+        request,
+        query=q.strip(),
+        tag=tag.strip(),
+        favorite_only=favorite,
+        min_rating=rating,
+        library_id=current_library_id,
+        node_id=current_node_id,
+    )
     return templates.TemplateResponse(
         request=request,
         name="partials/export_panel.html",
         context={
             "current_query": q.strip(),
             "current_tag": tag.strip(),
+            "current_favorite": favorite,
+            "current_rating": max(0, min(int(rating), 5)),
             "current_library_id": current_library_id,
             "current_node_id": current_node_id,
             "stats": build_stats(clips),

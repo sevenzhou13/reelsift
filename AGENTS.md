@@ -20,8 +20,8 @@
 | 语言 | Python 3.11+ | 不用 TypeScript、不用 Go |
 | 视频处理 | ffmpeg-python | 不要换成 moviepy |
 | 图像分析 | opencv-python | 算清晰度/抖动 |
-| AI 模型 | google-genai | 用 gemini-2.5-flash 模型 |
-| 数据库 | sqlite3（Python 内置） | 不要引入 SQLAlchemy、不要换成 PostgreSQL |
+| AI 模型 | 火山方舟兼容接口 | 通过 `.env` 配置 `ARK_*`，上传摘要可结合口播文本 |
+| 数据库 | SQLAlchemy Core + `DATABASE_URL` | 默认 SQLite，准备上云时可切 PostgreSQL |
 | Web 后端 | FastAPI | uvicorn 跑 |
 | 模板 | Jinja2 | FastAPI 自带支持 |
 | 前端交互 | HTMX | 不要用 React、Vue、Alpine |
@@ -46,14 +46,16 @@ reelsift/
 │
 ├── reelsift.py              # CLI 入口：python reelsift.py /path/to/videos
 ├── pipeline.py              # 处理流水线：扫描 → 抽帧 → AI 分析 → 存库
-├── ai.py                    # Gemini API 调用封装
+├── ai.py                    # 视觉摘要模型调用封装
 ├── metrics.py               # OpenCV 清晰度/抖动评分
-├── db.py                    # SQLite 读写
+├── db.py                    # SQLAlchemy Core 数据层
 ├── server.py                # FastAPI 服务器
 │
 ├── templates/
 │   ├── base.html            # 基础布局
 │   ├── index.html           # 主页（素材网格）
+│   ├── clip_detail.html     # 详情页
+│   ├── clip_cut.html        # 粗剪页
 │   └── partials/            # HTMX 局部刷新用
 │
 ├── static/
@@ -61,6 +63,8 @@ reelsift/
 │
 └── data/                    # 运行时数据（gitignore）
     ├── reelsift.db          # SQLite 数据库
+    ├── uploads/             # 上传原始视频
+    ├── previews/            # 浏览器预览版视频
     ├── thumbnails/          # 抽帧缓存
     │   └── {video_hash}/
     │       ├── 0.jpg ~ 5.jpg  # 6 张关键帧
@@ -86,12 +90,14 @@ reelsift/
 ### 错误处理
 - **清晰的错误信息**，告诉用户是哪个视频、哪一步出了问题
 - **不要 silent fail**。处理失败的视频要记录下来，在界面上显示"处理失败"
-- **网络错误（Gemini API）要重试**：指数退避，最多 3 次
+- **网络错误（视觉摘要 API）要重试**：指数退避，最多 3 次
 
-### SQLite
-- **不要每次查询都打开连接**。用一个全局连接或连接池
-- **必须加索引**：`clips(filename)`, `clip_tags(tag)`, `clip_tags(clip_id)`
-- **不要用 ORM**，写原生 SQL
+### 数据库
+- 当前数据层是 **SQLAlchemy Core + DATABASE_URL**，不是 ORM 模型层
+- 默认使用 `sqlite:///./data/reelsift.db`
+- 准备上云时可通过 `DATABASE_URL` 切 PostgreSQL
+- schema 变更要同时考虑 SQLite 和 PostgreSQL 可移植性
+- 常用索引仍要保留：`clips(filename)`, `clip_tags(tag)`, `clip_tags(clip_id)`
 
 ### FastAPI
 - **路由按功能分组**：`/clips/*`, `/tags/*`, `/export/*`
@@ -103,7 +109,7 @@ reelsift/
 ## 关键决策记录
 
 ### 为什么抽 6 张关键帧而不是更多
-- 再多 Gemini 成本线性上升
+- 再多视觉模型成本线性上升
 - 6 张足够让 AI 理解一段 10-30 秒视频的内容
 - UI 上也刚好能排成一行展示
 
@@ -112,13 +118,17 @@ reelsift/
 - 文件路径变了（重命名、移动）也不会重复抽帧
 - 相同内容但不同路径会浪费——这个目前可以接受
 
-### 为什么 Gemini 2.5 Flash
-- 支持原生视频/图片输入
-- 中文描述效果好
-- 便宜：处理 6 张图 + 文字输出约 ¥0.01，可忽略
-- 速度快：3-5 秒一次调用
-- 视觉理解比 2.0 升级一代
-- 2.0 Flash 将于 2026-06-01 下线，选稳定版避免再次迁移
+### 为什么视觉摘要可结合口播
+- 画面摘要擅长识别场景、主体、动作、构图和可用性
+- 口播文本能补充人物意图、观点、品牌词和无法从画面看出的信息
+- 当前上传流程中 ASR 是非阻塞可选项，失败不影响抽帧、视觉摘要和入库
+- 有 transcript 时，摘要提示词会把口播作为参考，而不是完全依赖口播
+
+### 为什么引入 DATABASE_URL
+- 本地单人使用仍默认 SQLite，启动和备份简单
+- 登录、管理员后台和后续上云需要更清晰的数据访问边界
+- `DATABASE_URL` 允许同一套数据层在 SQLite 和 PostgreSQL 间切换
+- 当前使用 SQLAlchemy Core 做 SQL 可移植封装，不使用 ORM 模型层
 
 ### 为什么 HTMX 而不是 React
 - 单人项目，不需要复杂状态管理
@@ -152,10 +162,10 @@ reelsift/
 - [x] Day 3: SQLite schema + 状态管理
 - [x] Day 4: FastAPI 页面、上传页、详情页
 - [x] Day 5: 素材网格、搜索、标签筛选
-- [~] Day 6: 多选导出、项目树、回收站、对比页已可用；仍在收尾交互
+- [~] Day 6: 多选导出、项目树、回收站、对比页、收藏评分、粗剪页已可用；仍在收尾交互
 - [ ] Day 7: 真实素材测试 + bug 修复
 
-**今天做到哪一天**：Day 6（项目树、回收站、对比页与选择模式收尾中）
+**今天做到哪一天**：Day 6（项目树、回收站、对比页、选择模式、收藏评分与粗剪交互收尾中）
 
 ### 当前实现方法
 
@@ -165,6 +175,11 @@ reelsift/
 - 详情页播放：默认播放浏览器预览版，原视频入口保留
 - 对比分：支持从详情页和素材库进入；当前已有综合推荐和一键保留
 - 清晰度：不再在上传时评分，改为对比分维度之一
+- 收藏与等级：素材卡片可收藏、设置 1-5 级评分，素材库页可筛选
+- 搜索增强：关键词会匹配文件名、摘要、标签和人工备注
+- 粗剪：详情页进入独立粗剪页，支持命名片段、预览、修边、删除确认和按名称导出
+- 导出目录：素材批量导出和粗剪片段导出可手动输入路径，也可调用本地文件夹选择弹窗
+- 文件夹弹窗：macOS 使用 `NSOpenPanel`，Windows 使用 `tkinter.filedialog.askdirectory()`；WSL、Docker、无 GUI 环境请手动输入路径
 
 ---
 
@@ -178,12 +193,13 @@ pip install -r requirements.txt
 python reelsift.py /path/to/my/videos
 
 # 启动 Web 界面
-python server.py
-# 或
-uvicorn server:app --reload --port 8000
+./.venv/bin/python -m uvicorn server:app --reload --host 127.0.0.1 --port 8000
+
+# Windows PowerShell
+.\.venv\Scripts\python.exe -m uvicorn server:app --reload --host 127.0.0.1 --port 8000
 
 # 清空缓存重新处理
-rm -rf data/thumbnails data/reelsift.db
+rm -rf data/thumbnails data/previews data/reelsift.db
 ```
 
 ---
@@ -194,10 +210,15 @@ rm -rf data/thumbnails data/reelsift.db
 - Mac：`brew install ffmpeg`
 - Windows: WSL 里 `sudo apt install ffmpeg`
 
-**Gemini API 401**：
-- 检查 .env 里 GEMINI_API_KEY 是否正确
-- 去 https://aistudio.google.com/ 重新生成
+**视觉摘要 API 认证失败**：
+- 检查 `.env` 里的 `ARK_API_KEY`、`ARK_BASE_URL`、`ARK_MODEL` 是否正确
+- 确认当前模型或 endpoint 已启用
 
 **处理速度太慢**：
-- 检查是否并行处理（Day 2 之后应该并发调用 Gemini）
-- 关键帧分辨率是否过高（应该 480p 够了）
+- 检查上传阶段抽帧是否正常走 ffmpeg
+- 关键帧分辨率不要过高，当前流程会压缩后再送视觉模型
+
+**导出文件夹弹窗不出现**：
+- macOS 确认本机有 Swift 工具链，首次会编译一个本地选择器到 `data/.pick_folder_bin`
+- Windows 确认服务运行在正常桌面会话里，不要在 WSL、Docker 或无 GUI 服务中期待系统弹窗
+- 弹窗不可用时可以直接在导出目录输入框里手动填写路径

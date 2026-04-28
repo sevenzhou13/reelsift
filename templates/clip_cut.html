@@ -1,0 +1,956 @@
+{% extends "base.html" %}
+{% block content %}
+<main class="mx-auto max-w-7xl px-4 py-6 sm:px-6 lg:px-8">
+  <section class="overflow-hidden rounded-[24px] border border-[#2A2A30] bg-[#0E0E10] p-5">
+    <div class="mb-5 flex flex-wrap items-center justify-between gap-4">
+      <div class="flex items-center gap-2 text-xs text-[#8A8A92]">
+        <a href="{{ library_url }}" class="transition hover:text-white">素材库</a>
+        <span class="text-[#3A3A42]">/</span>
+        <a href="{{ return_url }}" class="transition hover:text-white">{{ clip.filename }}</a>
+        <span class="text-[#3A3A42]">/</span>
+        <span class="text-white">粗剪</span>
+      </div>
+      <div class="flex items-center gap-2">
+        <a href="{{ return_url }}" class="rounded-lg border border-[#3A3A42] px-3 py-1.5 text-xs text-white transition hover:border-white/20">&larr; 返回详情</a>
+      </div>
+    </div>
+
+    <div class="grid gap-5 lg:grid-cols-[1.45fr_0.9fr]">
+      <!-- 左列：视频 + 粗剪时间轴 + 关键帧 -->
+      <div>
+        <div class="relative mb-3 aspect-[16/9] overflow-hidden rounded-[12px] bg-[#17171A]">
+          {% if clip.media_url %}
+          <video id="clip-player" controls playsinline preload="metadata" poster="{{ clip.cover_url }}" class="h-full w-full object-contain">
+            <source src="{{ clip.media_url }}" {% if clip.media_type %}type="{{ clip.media_type }}"{% endif %}>
+            当前浏览器无法直接播放这个视频。
+          </video>
+          {% elif clip.cover_url %}
+          <img src="{{ clip.cover_url }}" alt="{{ clip.filename }}" class="h-full w-full object-cover">
+          <div class="absolute inset-0 flex items-center justify-center">
+            <div class="rounded-full border border-white/20 bg-black/55 px-4 py-2 text-xs text-white backdrop-blur">预览暂不可用</div>
+          </div>
+          {% else %}
+          <div class="flex h-full items-center justify-center text-sm text-[#8A8A92]">暂无封面</div>
+          {% endif %}
+        </div>
+
+        {% if clip.media_url %}
+        <!-- 粗剪时间轴控制条 -->
+        <div class="mb-3 rounded-[14px] border border-[#2A2A30] bg-[#111114] px-3 pb-3 pt-2.5">
+          <!-- 时间标签行 -->
+          <div class="mb-2 flex items-center justify-between font-mono text-[11px]">
+            <span id="timeline-in-display" class="w-10 text-center text-[#5A5A62]">--:--</span>
+            <span id="timeline-current-display" class="tabular-nums text-[#8A8A92]">00:00</span>
+            <span id="timeline-out-display" class="w-10 text-center text-[#5A5A62]">--:--</span>
+          </div>
+
+          <!-- 时间轴轨道 -->
+          <div id="cut-main-track" class="relative h-10 cursor-pointer select-none" role="slider" aria-label="视频时间轴">
+            <!-- 轨道底色（绝对定位，垂直居中） -->
+            <div class="pointer-events-none absolute inset-x-0 rounded-full bg-[#2B2B31]" style="top:calc(50% - 3px);height:6px">
+              <!-- 区间高亮 -->
+              <div id="cut-range-fill" class="absolute inset-y-0 hidden rounded-full bg-[#D7FF3E]/40"></div>
+            </div>
+            <!-- 播放头 -->
+            <div id="cut-playhead" class="pointer-events-none absolute inset-y-1.5 w-0.5 -translate-x-1/2 rounded-full bg-white/55" style="left:0%"></div>
+            <!-- 入点手柄 -->
+            <div id="cut-in-handle" data-main-handle="in"
+              class="absolute top-1/2 hidden h-[22px] w-2 -translate-x-1/2 -translate-y-1/2 cursor-col-resize rounded-[3px] bg-[#D7FF3E] shadow-[0_0_0_3px_rgba(215,255,62,0.22)]"
+              style="left:0%"></div>
+            <!-- 出点手柄 -->
+            <div id="cut-out-handle" data-main-handle="out"
+              class="absolute top-1/2 hidden h-[22px] w-2 -translate-x-1/2 -translate-y-1/2 cursor-col-resize rounded-[3px] bg-[#D7FF3E] shadow-[0_0_0_3px_rgba(215,255,62,0.22)]"
+              style="left:100%"></div>
+          </div>
+
+          <!-- 操作按钮行 -->
+          <div class="mt-2 flex items-center justify-between gap-2">
+            <button id="btn-set-in" type="button"
+              class="flex items-center gap-1.5 rounded-lg border border-[#D7FF3E]/40 bg-[#D7FF3E]/10 px-3 py-1.5 text-[11px] font-medium text-[#D7FF3E] transition hover:bg-[#D7FF3E]/15"
+              title="快捷键 I">
+              <kbd class="rounded border border-[#D7FF3E]/40 px-1 font-sans text-[9px] leading-[1.5]">I</kbd>
+              <span>入点</span>
+            </button>
+            <button id="btn-preview-range" type="button" disabled
+              class="rounded-lg border border-[#3A3A42] px-3 py-1.5 text-[11px] text-[#8A8A92] transition hover:border-white/20 hover:text-white disabled:pointer-events-none disabled:opacity-40">
+              预览片段
+            </button>
+            <button id="btn-set-out" type="button"
+              class="flex items-center gap-1.5 rounded-lg border border-[#D7FF3E]/40 bg-[#D7FF3E]/10 px-3 py-1.5 text-[11px] font-medium text-[#D7FF3E] transition hover:bg-[#D7FF3E]/15"
+              title="快捷键 O">
+              <span>出点</span>
+              <kbd class="rounded border border-[#D7FF3E]/40 px-1 font-sans text-[9px] leading-[1.5]">O</kbd>
+            </button>
+          </div>
+        </div>
+
+        <div class="mb-4 flex flex-wrap items-center gap-3 text-xs text-[#8A8A92]">
+          <span class="rounded-lg border border-[#2A2A30] px-3 py-1.5 text-white/70">当前播放：浏览器预览版</span>
+          <a href="/media/{{ clip.id }}" target="_blank" rel="noreferrer" class="rounded-lg border border-[#3A3A42] px-3 py-1.5 text-white transition hover:border-white/20">单独打开原视频</a>
+        </div>
+        {% endif %}
+
+      </div>
+
+      <!-- 右列：新建片段表单 -->
+      <div>
+        <div class="mb-5 rounded-[16px] border border-[#2B2B31] bg-[#111114] p-4">
+          <div class="mb-3 flex items-center justify-between gap-3">
+            <div class="flex items-center gap-2">
+              <div class="h-[5px] w-[5px] rounded-full bg-[#D7FF3E]"></div>
+              <span class="text-[10px] uppercase tracking-[0.14em] text-[#8A8A92]">New Segment</span>
+            </div>
+            <span class="text-[10px] text-[#8A8A92]">原视频不修改</span>
+          </div>
+
+          <form id="cut-form" action="/clips/{{ clip.id }}/cut-segments" method="post" class="space-y-3">
+            <input type="hidden" name="library_id" value="{{ current_library_id }}">
+            <input type="hidden" id="cut-start-time" name="start_time">
+            <input type="hidden" id="cut-end-time" name="end_time">
+
+            <label class="block">
+              <span class="mb-1.5 block text-[10px] uppercase tracking-[0.12em] text-[#8A8A92]">片段名称</span>
+              <input
+                name="segment_name"
+                type="text"
+                placeholder="例如：开场笑点 / 第一次跳 Kpop"
+                class="w-full rounded-[12px] border border-[#313139] bg-[#17171A] px-3 py-2 text-sm text-white outline-none placeholder:text-[#5A5A62] focus:border-[#D7FF3E]"
+              >
+            </label>
+
+            <!-- 已选区间展示 -->
+            <div class="flex min-h-[40px] items-center rounded-[12px] border border-[#2A2A30] bg-[#17171A] px-3">
+              <span id="form-range-hint" class="text-[11px] text-[#5A5A62]">在视频下方设置入点和出点</span>
+              <span id="form-range-value" class="hidden font-mono text-sm text-white"></span>
+            </div>
+
+            <input
+              name="note"
+              type="text"
+              placeholder="备注，可选"
+              class="w-full rounded-[12px] border border-[#313139] bg-[#17171A] px-3 py-2 text-sm text-white outline-none placeholder:text-[#5A5A62] focus:border-[#D7FF3E]"
+            >
+            <div class="flex items-center justify-between gap-3">
+              <p class="text-[11px] text-[#6B6B74]">保存的是时间标记，导出时才生成视频文件。</p>
+              <button type="submit" class="rounded-full bg-[#D7FF3E] px-4 py-2 text-[11px] font-medium uppercase tracking-[0.08em] text-[#0E0E10]">Save Cut</button>
+            </div>
+          </form>
+
+          {% if cut_error %}
+          <div class="mt-3 rounded-[10px] border border-[#5A2525] bg-[#2A1515] px-3 py-2 text-sm text-[#f2b4b4]">
+            {{ cut_error }}
+          </div>
+          {% endif %}
+        </div>
+
+        {% if clip.keyframe_urls %}
+        <div class="rounded-[16px] border border-[#2B2B31] bg-[#111114] p-4">
+          <p class="mb-3 text-[10px] uppercase tracking-[0.08em] text-[#8A8A92]">Key moments</p>
+          <div class="grid grid-cols-3 gap-2">
+            {% for frame_url in clip.keyframe_urls %}
+            <div class="aspect-[16/9] overflow-hidden rounded-[6px] bg-[#17171A]">
+              <img src="{{ frame_url }}" alt="关键帧 {{ loop.index }}" class="h-full w-full object-cover">
+            </div>
+            {% endfor %}
+          </div>
+        </div>
+        {% endif %}
+      </div>
+    </div>
+
+    <!-- 已保存片段列表 -->
+    <div class="mt-5 rounded-[16px] border border-[#2B2B31] bg-[#111114] p-4">
+      <div class="mb-3 flex items-center justify-between gap-3">
+        <div class="flex items-center gap-2">
+          <div class="h-[5px] w-[5px] rounded-full bg-[#D7FF3E]"></div>
+          <span class="text-[10px] uppercase tracking-[0.14em] text-[#8A8A92]">Segments</span>
+        </div>
+        <span class="text-[10px] text-[#8A8A92]">{{ cut_segments|length }} 个片段</span>
+      </div>
+
+      {% if cut_segments %}
+      <div class="space-y-3">
+        {% for segment in cut_segments %}
+        <div
+          class="rounded-[14px] border border-[#2B2B31] bg-[#17171A] px-3 py-3 transition hover:border-[#D7FF3E]/45 hover:bg-[#1D1D20]"
+          data-preview-cut
+          data-start-ms="{{ segment.start_ms }}"
+          data-end-ms="{{ segment.end_ms }}"
+          data-duration-text="{{ segment.duration_text }}"
+        >
+          <div class="flex items-start justify-between gap-3">
+            <button type="button" class="min-w-0 flex-1 text-left" data-preview-cut-button>
+              <span class="block truncate text-sm font-medium text-white">{{ segment.name }}</span>
+              <span class="mt-1 block text-[11px] text-[#8A8A92]">{{ segment.start_text }} - {{ segment.end_text }} · {{ segment.duration_text }}{% if segment.note %} · {{ segment.note }}{% endif %}</span>
+              {% if segment.exported_url %}
+              <a href="{{ segment.exported_url }}" target="_blank" rel="noreferrer" data-ignore-cut-preview class="mt-2 inline-flex text-[11px] text-[#D7FF3E] transition hover:text-white">打开导出片段</a>
+              {% endif %}
+            </button>
+            <div class="flex shrink-0 flex-wrap justify-end gap-2">
+              <button type="button" class="rounded-full border border-[#3A3A42] px-3 py-1.5 text-[10px] uppercase tracking-[0.08em] text-white transition hover:border-[#D7FF3E] hover:text-[#D7FF3E]" data-trim-cut>trim</button>
+              <form action="/clips/{{ clip.id }}/cut-segments/{{ segment.id }}/export" method="post" data-confirm-cut="export" data-segment-name="{{ segment.name }}">
+                <input type="hidden" name="library_id" value="{{ current_library_id }}">
+                <button type="submit" class="rounded-full border border-[#3A3A42] px-3 py-1.5 text-[10px] uppercase tracking-[0.08em] text-white transition hover:border-[#D7FF3E] hover:text-[#D7FF3E]">export</button>
+              </form>
+              <form action="/clips/{{ clip.id }}/cut-segments/{{ segment.id }}/delete" method="post" data-confirm-cut="delete" data-segment-name="{{ segment.name }}">
+                <input type="hidden" name="library_id" value="{{ current_library_id }}">
+                <button type="submit" class="rounded-full border border-[#4A2A2A] px-3 py-1.5 text-[10px] uppercase tracking-[0.08em] text-[#D99A92] transition hover:border-[#FF6B57] hover:text-[#FFB4A9]">delete</button>
+              </form>
+            </div>
+          </div>
+          <form
+            action="/clips/{{ clip.id }}/cut-segments/{{ segment.id }}/range"
+            method="post"
+            class="mt-3 hidden rounded-[12px] border border-[#D7FF3E]/25 bg-[#D7FF3E]/8 p-3"
+            data-trim-panel
+          >
+            <input type="hidden" name="library_id" value="{{ current_library_id }}">
+            <input type="hidden" name="start_ms" value="{{ segment.start_ms }}" data-trim-start-ms>
+            <input type="hidden" name="end_ms" value="{{ segment.end_ms }}" data-trim-end-ms>
+            <input type="hidden" value="{{ segment.start_ms }}" data-trim-original-start-ms>
+            <input type="hidden" value="{{ segment.end_ms }}" data-trim-original-end-ms>
+            <div class="mb-3 flex items-center justify-between gap-3 text-[11px] text-[#8A8A92]">
+              <span>修边模式：可在原视频里自由定位</span>
+              <div class="flex items-center gap-3">
+                <button type="button" class="text-[#D7FF3E] transition hover:text-white" data-trim-reset>还原原时间</button>
+                <button type="button" class="text-[#D7FF3E] transition hover:text-white" data-trim-exit>退出</button>
+              </div>
+            </div>
+            <div class="grid grid-cols-2 gap-2">
+              <button type="button" class="rounded-[10px] border border-[#D7FF3E]/40 px-3 py-2 text-xs font-medium text-[#D7FF3E] transition hover:bg-[#D7FF3E]/10" data-set-trim-point="start">当前帧设为入点</button>
+              <button type="button" class="rounded-[10px] border border-[#D7FF3E]/40 px-3 py-2 text-xs font-medium text-[#D7FF3E] transition hover:bg-[#D7FF3E]/10" data-set-trim-point="end">当前帧设为出点</button>
+            </div>
+            <div class="mt-3 flex items-center justify-between gap-3 text-[11px] text-[#8A8A92]">
+              <span data-trim-range-label>{{ segment.start_text }} - {{ segment.end_text }}</span>
+              <button type="submit" class="rounded-full bg-[#D7FF3E] px-3 py-1.5 text-[10px] font-medium uppercase tracking-[0.08em] text-[#0E0E10]">保存修边</button>
+            </div>
+          </form>
+          <div class="mt-3" data-ignore-cut-preview>
+            <div
+              class="group relative h-5 cursor-pointer rounded-full py-[7px]"
+              data-cut-progress-track
+              role="slider"
+              aria-label="片段预览进度"
+              aria-valuemin="0"
+              aria-valuemax="100"
+              aria-valuenow="0"
+            >
+              <div class="h-1.5 overflow-hidden rounded-full bg-[#2B2B31]">
+                <div class="h-full w-0 rounded-full bg-[#D7FF3E]" data-cut-progress-bar></div>
+              </div>
+              <div class="absolute top-1/2 hidden h-3 -translate-y-1/2 rounded-full bg-[#D7FF3E]/35" data-cut-trim-range></div>
+              <!-- 原始入/出点位置标记，修边模式时显示，吸附时变实心 -->
+              <div class="pointer-events-none absolute top-1/2 hidden h-3 w-3 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-[#D7FF3E]/70 bg-[#17171A] transition-colors" data-snap-dot="start"></div>
+              <div class="pointer-events-none absolute top-1/2 hidden h-3 w-3 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-[#D7FF3E]/70 bg-[#17171A] transition-colors" data-snap-dot="end"></div>
+              <div class="absolute top-1/2 h-3 w-3 -translate-x-1/2 -translate-y-1/2 rounded-full border border-[#0E0E10] bg-[#D7FF3E] opacity-0 shadow-[0_0_0_3px_rgba(215,255,62,0.16)] transition group-hover:opacity-100" data-cut-progress-thumb></div>
+              <button type="button" class="absolute top-1/2 hidden h-6 w-3 -translate-x-1/2 -translate-y-1/2 rounded-full border border-[#0E0E10] bg-[#D7FF3E] shadow-[0_0_0_4px_rgba(215,255,62,0.12)]" data-cut-trim-handle="start" aria-label="拖动调整入点"></button>
+              <button type="button" class="absolute top-1/2 hidden h-6 w-3 -translate-x-1/2 -translate-y-1/2 rounded-full border border-[#0E0E10] bg-[#D7FF3E] shadow-[0_0_0_4px_rgba(215,255,62,0.12)]" data-cut-trim-handle="end" aria-label="拖动调整出点"></button>
+            </div>
+            <div class="mt-1 flex items-center justify-between text-[10px] text-[#6B6B74]">
+              <span data-cut-progress-label>00:00</span>
+              <span data-cut-duration-label>{{ segment.duration_text }}</span>
+            </div>
+          </div>
+        </div>
+        {% endfor %}
+      </div>
+      {% else %}
+      <div class="rounded-[14px] border border-dashed border-[#313139] bg-[#17171A] px-4 py-6 text-center text-sm text-[#8A8A92]">
+        还没有保存粗剪片段。
+      </div>
+      {% endif %}
+    </div>
+  </section>
+</main>
+
+<div id="cut-confirm-modal" class="fixed inset-0 z-[70] hidden">
+  <div class="absolute inset-0 bg-black/70 backdrop-blur-sm"></div>
+  <div class="relative flex min-h-screen items-center justify-center px-4 py-8">
+    <div class="w-full max-w-[420px] overflow-hidden rounded-[24px] border border-[#303038] bg-[#110F11] shadow-[0_40px_120px_rgba(0,0,0,0.55)]">
+      <div class="border-b border-[#232329] px-5 pb-4 pt-5">
+        <p id="cut-confirm-title" class="text-lg font-medium tracking-tight text-white">确认操作</p>
+        <p id="cut-confirm-message" class="mt-2 text-sm leading-6 text-[#A7A7B0]"></p>
+      </div>
+      <div class="px-5 py-4">
+        <div class="rounded-[16px] border border-[#2B2B31] bg-[#17171A] px-4 py-3">
+          <p class="text-[10px] uppercase tracking-[0.16em] text-[#8A8A92]">Segment</p>
+          <p id="cut-confirm-name" class="mt-2 truncate text-sm text-white"></p>
+        </div>
+        <!-- 仅 export 动作时显示 -->
+        <div id="cut-confirm-export-dir-section" class="mt-3 hidden">
+          <label class="block">
+            <span class="mb-1.5 block text-[10px] uppercase tracking-[0.12em] text-[#8A8A92]">导出目录</span>
+            <div class="flex gap-2">
+              <input
+                id="cut-confirm-export-dir"
+                type="text"
+                placeholder="留空使用默认目录"
+                autocomplete="off"
+                spellcheck="false"
+                class="min-w-0 flex-1 rounded-[12px] border border-[#313139] bg-[#17171A] px-3 py-2 font-mono text-sm text-white outline-none placeholder:text-[#5A5A62] focus:border-[#D7FF3E]"
+              >
+              <button
+                type="button"
+                id="pick-cut-export-dir-btn"
+                class="shrink-0 rounded-[12px] border border-[#3A3A42] px-3 py-2 text-sm text-[#8A8A92] transition hover:border-white/20 hover:text-white disabled:opacity-50"
+              >
+                浏览
+              </button>
+            </div>
+            <span class="mt-1 block text-[11px] text-[#5A5A62]">点击"浏览"选取文件夹，或直接输入路径。</span>
+          </label>
+        </div>
+      </div>
+      <div class="flex items-center justify-end gap-2 border-t border-[#232329] px-5 py-4">
+        <button type="button" id="cancel-cut-confirm" class="rounded-full border border-[#303038] px-4 py-2 text-[11px] uppercase tracking-[0.08em] text-[#8A8A92] transition hover:border-white/20 hover:text-white">Cancel</button>
+        <button type="button" id="submit-cut-confirm" class="rounded-full bg-[#D7FF3E] px-4 py-2 text-[11px] font-medium uppercase tracking-[0.08em] text-[#0E0E10]">Confirm</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div id="cut-export-modal" class="fixed inset-0 z-[80] hidden">
+  <div class="absolute inset-0 bg-black/70 backdrop-blur-sm"></div>
+  <div class="relative flex min-h-screen items-center justify-center px-4 py-8">
+    <div class="w-full max-w-[560px] overflow-hidden rounded-[24px] border border-[#2A2A30] bg-[#0E0E10] shadow-[0_40px_120px_rgba(0,0,0,0.55)]">
+      <div id="cut-export-state-packing" class="px-5 py-6">
+        <div class="flex items-center gap-3">
+          <div class="h-8 w-8 animate-spin rounded-full border-2 border-[#D7FF3E] border-t-transparent"></div>
+          <div>
+            <p class="text-lg font-medium tracking-tight text-white">正在导出片段</p>
+            <p class="mt-1 text-xs text-[#8A8A92]">会生成原视频的剪切版，并放到 data/picks/。</p>
+          </div>
+        </div>
+      </div>
+      <div id="cut-export-state-ready" class="hidden"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+  (() => {
+    const body = document.body;
+    const video = document.getElementById("clip-player");
+
+    // ── 主时间轴元素 ──────────────────────────────────────────
+    const mainTrack        = document.getElementById("cut-main-track");
+    const playhead         = document.getElementById("cut-playhead");
+    const rangeFill        = document.getElementById("cut-range-fill");
+    const inHandle         = document.getElementById("cut-in-handle");
+    const outHandle        = document.getElementById("cut-out-handle");
+    const currentTimeDisp  = document.getElementById("timeline-current-display");
+    const inDisp           = document.getElementById("timeline-in-display");
+    const outDisp          = document.getElementById("timeline-out-display");
+    const btnSetIn         = document.getElementById("btn-set-in");
+    const btnSetOut        = document.getElementById("btn-set-out");
+    const previewBtn       = document.getElementById("btn-preview-range");
+    const cutStartInput    = document.getElementById("cut-start-time");
+    const cutEndInput      = document.getElementById("cut-end-time");
+    const formRangeHint    = document.getElementById("form-range-hint");
+    const formRangeValue   = document.getElementById("form-range-value");
+    const cutForm          = document.getElementById("cut-form");
+
+    // ── 主时间轴状态 ─────────────────────────────────────────
+    let inPointSeconds     = null;
+    let outPointSeconds    = null;
+    let mainDragType       = null;   // null | "seek" | "in" | "out"
+    let mainRangePreviewEnd = null;
+
+    // ── 片段卡片状态 ─────────────────────────────────────────
+    const confirmModal  = document.getElementById("cut-confirm-modal");
+    const confirmTitle  = document.getElementById("cut-confirm-title");
+    const confirmMsg    = document.getElementById("cut-confirm-message");
+    const confirmName   = document.getElementById("cut-confirm-name");
+    const cancelConfirm = document.getElementById("cancel-cut-confirm");
+    const submitConfirm = document.getElementById("submit-cut-confirm");
+    const exportModal   = document.getElementById("cut-export-modal");
+    const packingState  = document.getElementById("cut-export-state-packing");
+    const readyState    = document.getElementById("cut-export-state-ready");
+    let pendingForm     = null;
+    let pendingAction   = "";
+    let previewStartSeconds = null;
+    let previewEndSeconds   = null;
+    let activePreviewCard   = null;
+    let draggingProgress    = false;
+    let trimmingCard        = null;
+    let draggingTrimHandle  = null;
+
+    // ── 工具函数 ─────────────────────────────────────────────
+    function fmt(sec) {
+      const t = Math.max(Math.floor(sec), 0);
+      return `${String(Math.floor(t / 60)).padStart(2, "0")}:${String(t % 60).padStart(2, "0")}`;
+    }
+
+    function fmtMs(ms) { return fmt(Math.max(ms, 0) / 1000); }
+
+    function getDuration() {
+      return video && Number.isFinite(video.duration) && video.duration > 0 ? video.duration : 0;
+    }
+
+    function trackRatio(clientX) {
+      if (!mainTrack) return 0;
+      const r = mainTrack.getBoundingClientRect();
+      return Math.max(0, Math.min((clientX - r.left) / r.width, 1));
+    }
+
+    // ── 主时间轴渲染 ─────────────────────────────────────────
+    function renderMainTimeline() {
+      if (!video || !mainTrack) return;
+      const dur = getDuration();
+
+      if (playhead) playhead.style.left = dur > 0 ? `${(video.currentTime / dur) * 100}%` : "0%";
+
+      if (currentTimeDisp) currentTimeDisp.textContent = fmt(video.currentTime || 0);
+
+      const inSet = inPointSeconds !== null;
+      const outSet = outPointSeconds !== null;
+
+      if (inDisp) {
+        inDisp.textContent = inSet ? fmt(inPointSeconds) : "--:--";
+        inDisp.classList.toggle("text-[#D7FF3E]", inSet);
+        inDisp.classList.toggle("text-[#5A5A62]", !inSet);
+      }
+      if (outDisp) {
+        outDisp.textContent = outSet ? fmt(outPointSeconds) : "--:--";
+        outDisp.classList.toggle("text-[#D7FF3E]", outSet);
+        outDisp.classList.toggle("text-[#5A5A62]", !outSet);
+      }
+
+      if (dur <= 0) return;
+
+      if (inHandle) {
+        if (inSet) { inHandle.style.left = `${Math.max(0, Math.min(inPointSeconds / dur * 100, 100))}%`; inHandle.classList.remove("hidden"); }
+        else inHandle.classList.add("hidden");
+      }
+      if (outHandle) {
+        if (outSet) { outHandle.style.left = `${Math.max(0, Math.min(outPointSeconds / dur * 100, 100))}%`; outHandle.classList.remove("hidden"); }
+        else outHandle.classList.add("hidden");
+      }
+      if (rangeFill) {
+        if (inSet && outSet) {
+          const lo = Math.min(inPointSeconds, outPointSeconds) / dur * 100;
+          const hi = Math.max(inPointSeconds, outPointSeconds) / dur * 100;
+          rangeFill.style.left = `${lo}%`;
+          rangeFill.style.width = `${hi - lo}%`;
+          rangeFill.classList.remove("hidden");
+        } else {
+          rangeFill.classList.add("hidden");
+        }
+      }
+    }
+
+    function syncForm() {
+      const ready = inPointSeconds !== null && outPointSeconds !== null && inPointSeconds < outPointSeconds;
+      if (ready) {
+        const inStr = fmt(inPointSeconds);
+        const outStr = fmt(outPointSeconds);
+        if (cutStartInput) cutStartInput.value = inStr;
+        if (cutEndInput)   cutEndInput.value   = outStr;
+        if (formRangeHint)  formRangeHint.classList.add("hidden");
+        if (formRangeValue) { formRangeValue.textContent = `${inStr}  →  ${outStr}`; formRangeValue.classList.remove("hidden"); }
+        if (previewBtn) previewBtn.disabled = false;
+      } else {
+        if (cutStartInput) cutStartInput.value = "";
+        if (cutEndInput)   cutEndInput.value   = "";
+        if (formRangeHint)  { formRangeHint.classList.remove("hidden"); formRangeHint.classList.remove("text-[#f2b4b4]"); formRangeHint.classList.add("text-[#5A5A62]"); formRangeHint.textContent = "在视频下方设置入点和出点"; }
+        if (formRangeValue) formRangeValue.classList.add("hidden");
+        if (previewBtn) previewBtn.disabled = true;
+      }
+    }
+
+    function setInPoint(s) {
+      const dur = getDuration();
+      inPointSeconds = Math.max(0, dur > 0 ? Math.min(s, dur) : s);
+      if (outPointSeconds !== null && inPointSeconds >= outPointSeconds) outPointSeconds = null;
+      renderMainTimeline();
+      syncForm();
+    }
+
+    function setOutPoint(s) {
+      const dur = getDuration();
+      outPointSeconds = Math.max(0, dur > 0 ? Math.min(s, dur) : s);
+      if (inPointSeconds !== null && outPointSeconds <= inPointSeconds) inPointSeconds = null;
+      renderMainTimeline();
+      syncForm();
+    }
+
+    // ── 主时间轴交互 ─────────────────────────────────────────
+    if (mainTrack && video) {
+      mainTrack.addEventListener("pointerdown", (e) => {
+        const h = e.target.closest("[data-main-handle]");
+        if (h) {
+          mainDragType = h.dataset.mainHandle;
+        } else {
+          mainDragType = "seek";
+          video.currentTime = trackRatio(e.clientX) * getDuration();
+          renderMainTimeline();
+        }
+        mainTrack.setPointerCapture(e.pointerId);
+        e.preventDefault();
+      });
+
+      mainTrack.addEventListener("pointermove", (e) => {
+        if (!mainDragType) return;
+        e.preventDefault();
+        const s = trackRatio(e.clientX) * getDuration();
+        const dur = getDuration();
+        if (mainDragType === "seek") {
+          video.currentTime = s;
+          renderMainTimeline();
+        } else if (mainDragType === "in") {
+          inPointSeconds = Math.max(0, dur > 0 ? Math.min(s, dur) : s);
+          if (outPointSeconds !== null && inPointSeconds >= outPointSeconds) inPointSeconds = outPointSeconds - 0.1;
+          video.currentTime = Math.max(0, inPointSeconds);
+          renderMainTimeline();
+          syncForm();
+        } else if (mainDragType === "out") {
+          outPointSeconds = Math.max(0, dur > 0 ? Math.min(s, dur) : s);
+          if (inPointSeconds !== null && outPointSeconds <= inPointSeconds) outPointSeconds = inPointSeconds + 0.1;
+          video.currentTime = Math.max(0, outPointSeconds);
+          renderMainTimeline();
+          syncForm();
+        }
+      });
+
+      mainTrack.addEventListener("pointerup", (e) => {
+        if (!mainDragType) return;
+        e.preventDefault();
+        try { mainTrack.releasePointerCapture(e.pointerId); } catch (_) {}
+        mainDragType = null;
+      });
+
+      mainTrack.addEventListener("pointercancel", (e) => {
+        mainDragType = null;
+        try { mainTrack.releasePointerCapture(e.pointerId); } catch (_) {}
+      });
+    }
+
+    // ── 入/出点按钮 ──────────────────────────────────────────
+    btnSetIn?.addEventListener("click", () => { if (video) setInPoint(video.currentTime); });
+    btnSetOut?.addEventListener("click", () => { if (video) setOutPoint(video.currentTime); });
+
+    previewBtn?.addEventListener("click", () => {
+      if (inPointSeconds === null || outPointSeconds === null || !video) return;
+      mainRangePreviewEnd = outPointSeconds;
+      previewStartSeconds = null;
+      previewEndSeconds   = null;
+      activePreviewCard   = null;
+      video.currentTime   = inPointSeconds;
+      video.play().catch(() => {});
+    });
+
+    // ── 键盘快捷键 I / O ─────────────────────────────────────
+    document.addEventListener("keydown", (e) => {
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+      if (e.key === "i" || e.key === "I") { e.preventDefault(); if (video) setInPoint(video.currentTime); }
+      else if (e.key === "o" || e.key === "O") { e.preventDefault(); if (video) setOutPoint(video.currentTime); }
+    });
+
+    // ── 表单提交：缺少入/出点时拦截 ─────────────────────────
+    cutForm?.addEventListener("submit", (e) => {
+      if (!cutStartInput?.value || !cutEndInput?.value) {
+        e.preventDefault();
+        if (formRangeHint) {
+          formRangeHint.textContent = "请先设置入点和出点";
+          formRangeHint.classList.remove("hidden", "text-[#5A5A62]");
+          formRangeHint.classList.add("text-[#f2b4b4]");
+        }
+        if (formRangeValue) formRangeValue.classList.add("hidden");
+      }
+    });
+
+    // ── 视频事件 ─────────────────────────────────────────────
+    video?.addEventListener("timeupdate", () => {
+      renderMainTimeline();
+
+      // 主区间预览到终点自动停
+      if (mainRangePreviewEnd !== null && video.currentTime >= mainRangePreviewEnd) {
+        video.pause();
+        video.currentTime = mainRangePreviewEnd;
+        mainRangePreviewEnd = null;
+      }
+
+      // 片段卡片预览进度
+      if (trimmingCard) {
+        const dur = getDuration();
+        if (dur > 0) { setSegmentProgress(trimmingCard, (video.currentTime / dur) * 100, video.currentTime); updateTrimTimeline(trimmingCard); }
+        return;
+      }
+      if (draggingProgress) return;
+      if (!previewStartSeconds || !previewEndSeconds || !activePreviewCard) return;
+      const span = Math.max(previewEndSeconds - previewStartSeconds, 0.01);
+      const elapsed = Math.max(video.currentTime - previewStartSeconds, 0);
+      setSegmentProgress(activePreviewCard, (elapsed / span) * 100, Math.min(elapsed, span));
+      if (video.currentTime >= previewEndSeconds) {
+        video.pause();
+        video.currentTime = previewEndSeconds;
+        setSegmentProgress(activePreviewCard, 100, span);
+        previewStartSeconds = null;
+        previewEndSeconds   = null;
+      }
+    });
+
+    video?.addEventListener("seeking", () => {
+      // 用户手动拖原生进度条时取消主区间预览
+      if (mainDragType === null && mainRangePreviewEnd !== null) mainRangePreviewEnd = null;
+      if (!previewStartSeconds || !previewEndSeconds) return;
+      if (video.currentTime < previewStartSeconds || video.currentTime > previewEndSeconds) {
+        previewStartSeconds = null;
+        previewEndSeconds   = null;
+      }
+    });
+
+    video?.addEventListener("loadedmetadata", () => {
+      renderMainTimeline();
+      if (trimmingCard) updateTrimTimeline(trimmingCard);
+    });
+
+    // ── 片段卡片既有逻辑 ─────────────────────────────────────
+
+    function getTrimPanel(card) { return card?.querySelector("[data-trim-panel]"); }
+
+    function getTrimValues(card) {
+      const panel = getTrimPanel(card);
+      const si = panel?.querySelector("[data-trim-start-ms]");
+      const ei = panel?.querySelector("[data-trim-end-ms]");
+      return { panel, startInput: si, endInput: ei, startMs: Number(si?.value || card?.dataset.startMs || 0), endMs: Number(ei?.value || card?.dataset.endMs || 0) };
+    }
+
+    function setSegmentProgress(card, pct, elapsed) {
+      const bar   = card?.querySelector("[data-cut-progress-bar]");
+      const thumb = card?.querySelector("[data-cut-progress-thumb]");
+      const track = card?.querySelector("[data-cut-progress-track]");
+      const label = card?.querySelector("[data-cut-progress-label]");
+      const p = Math.max(0, Math.min(pct, 100));
+      if (bar)   bar.style.width = `${p}%`;
+      if (thumb) { thumb.style.left = `${p}%`; thumb.style.opacity = p > 0 ? "1" : ""; }
+      if (track) track.setAttribute("aria-valuenow", String(Math.round(p)));
+      if (label) label.textContent = fmt(elapsed);
+    }
+
+    function updateTrimTimeline(card) {
+      const dur   = getDuration();
+      const fill  = card?.querySelector("[data-cut-trim-range]");
+      const sh    = card?.querySelector('[data-cut-trim-handle="start"]');
+      const eh    = card?.querySelector('[data-cut-trim-handle="end"]');
+      const snapS = card?.querySelector('[data-snap-dot="start"]');
+      const snapE = card?.querySelector('[data-snap-dot="end"]');
+      if (!card || trimmingCard !== card || dur <= 0) {
+        fill?.classList.add("hidden"); sh?.classList.add("hidden"); eh?.classList.add("hidden");
+        snapS?.classList.add("hidden"); snapE?.classList.add("hidden");
+        return;
+      }
+      const { startMs, endMs } = getTrimValues(card);
+      const sp = Math.max(0, Math.min(startMs / 1000 / dur * 100, 100));
+      const ep = Math.max(0, Math.min(endMs   / 1000 / dur * 100, 100));
+      if (fill)  { fill.classList.remove("hidden"); fill.style.left = `${sp}%`; fill.style.width = `${Math.max(ep - sp, 0)}%`; }
+      if (sh)    { sh.classList.remove("hidden"); sh.style.left = `${sp}%`; }
+      if (eh)    { eh.classList.remove("hidden"); eh.style.left = `${ep}%`; }
+      // 原始位置标记
+      const origS = Number(card.querySelector("[data-trim-original-start-ms]")?.value || 0);
+      const origE = Number(card.querySelector("[data-trim-original-end-ms]")?.value   || 0);
+      if (snapS) { snapS.style.left = `${Math.max(0, Math.min(origS / 1000 / dur * 100, 100))}%`; snapS.classList.remove("hidden"); }
+      if (snapE) { snapE.style.left = `${Math.max(0, Math.min(origE / 1000 / dur * 100, 100))}%`; snapE.classList.remove("hidden"); }
+    }
+
+    function getCutRange(card) {
+      const s = Math.max(Number(card.dataset.startMs || 0) / 1000, 0);
+      const e = Math.max(Number(card.dataset.endMs   || 0) / 1000, s);
+      return { startSeconds: s, endSeconds: e, duration: Math.max(e - s, 0.01) };
+    }
+
+    function seekCutByPointer(card, ev) {
+      if (!video) return;
+      const track = card.querySelector("[data-cut-progress-track]");
+      if (!track) return;
+      const r     = track.getBoundingClientRect();
+      const ratio = Math.max(0, Math.min((ev.clientX - r.left) / r.width, 1));
+      if (trimmingCard === card && getDuration() > 0) {
+        video.currentTime = getDuration() * ratio;
+        setSegmentProgress(card, ratio * 100, video.currentTime);
+        return;
+      }
+      const range = getCutRange(card);
+      const elapsed = range.duration * ratio;
+      previewStartSeconds = range.startSeconds;
+      previewEndSeconds   = range.endSeconds;
+      video.currentTime   = range.startSeconds + elapsed;
+      setActivePreviewCard(card);
+      setSegmentProgress(card, ratio * 100, elapsed);
+    }
+
+    function exitTrimMode() {
+      if (!trimmingCard) return;
+      const prev = trimmingCard;
+      getTrimPanel(trimmingCard)?.classList.add("hidden");
+      trimmingCard.classList.remove("ring-1", "ring-[#D7FF3E]/35");
+      trimmingCard = null;
+      draggingTrimHandle = null;
+      updateTrimTimeline(prev);
+    }
+
+    function enterTrimMode(card) {
+      exitTrimMode();
+      trimmingCard = card;
+      previewStartSeconds = null;
+      previewEndSeconds   = null;
+      video?.pause();
+      setActivePreviewCard(card);
+      getTrimPanel(card)?.classList.remove("hidden");
+      card.classList.add("ring-1", "ring-[#D7FF3E]/35");
+      updateTrimTimeline(card);
+    }
+
+    function updateTrimLabel(panel) {
+      const si    = panel.querySelector("[data-trim-start-ms]");
+      const ei    = panel.querySelector("[data-trim-end-ms]");
+      const label = panel.querySelector("[data-trim-range-label]");
+      if (!si || !ei || !label) return;
+      label.textContent = `${fmtMs(Number(si.value || 0))} - ${fmtMs(Number(ei.value || 0))}`;
+      const card = panel.closest("[data-preview-cut]");
+      if (card) updateTrimTimeline(card);
+    }
+
+    function setTrimPointFromTrack(card, handle, ev) {
+      if (!card || getDuration() <= 0) return;
+      const track = card.querySelector("[data-cut-progress-track]");
+      if (!track) return;
+      const { panel, startInput, endInput } = getTrimValues(card);
+      if (!panel || !startInput || !endInput) return;
+      const r     = track.getBoundingClientRect();
+      const ratio = Math.max(0, Math.min((ev.clientX - r.left) / r.width, 1));
+      const rawMs = Math.max(Math.round(getDuration() * ratio * 1000), 0);
+      const minGap = 200;
+      // 吸附阈值：屏幕上 10px 对应的毫秒数
+      const snapThresh = r.width > 0 ? Math.round((10 / r.width) * getDuration() * 1000) : 300;
+      const origS  = Number(card.querySelector("[data-trim-original-start-ms]")?.value || 0);
+      const origE  = Number(card.querySelector("[data-trim-original-end-ms]")?.value   || 0);
+      const snapSEl = card.querySelector('[data-snap-dot="start"]');
+      const snapEEl = card.querySelector('[data-snap-dot="end"]');
+      let sMs = Number(startInput.value || 0);
+      let eMs = Number(endInput.value   || 0);
+      if (handle === "start") {
+        let val = Math.max(Math.min(rawMs, eMs - minGap), 0);
+        const snapping = Math.abs(val - origS) <= snapThresh;
+        if (snapping) val = origS;
+        startInput.value = String(val);
+        if (video) video.currentTime = val / 1000;
+        // 吸附时：标记变实心黄色；离开时恢复描边
+        if (snapSEl) { snapSEl.classList.toggle("bg-[#D7FF3E]", snapping); snapSEl.classList.toggle("bg-[#17171A]", !snapping); }
+      } else {
+        let val = Math.max(rawMs, sMs + minGap);
+        const snapping = Math.abs(val - origE) <= snapThresh;
+        if (snapping) val = origE;
+        endInput.value = String(val);
+        if (video) video.currentTime = val / 1000;
+        if (snapEEl) { snapEEl.classList.toggle("bg-[#D7FF3E]", snapping); snapEEl.classList.toggle("bg-[#17171A]", !snapping); }
+      }
+      updateTrimLabel(panel);
+    }
+
+    function setActivePreviewCard(card) {
+      if (activePreviewCard === card) return;
+      if (activePreviewCard) {
+        activePreviewCard.classList.remove("border-[#D7FF3E]", "bg-[#252514]");
+        activePreviewCard.classList.add("border-[#2B2B31]", "bg-[#17171A]");
+        setSegmentProgress(activePreviewCard, 0, 0);
+      }
+      activePreviewCard = card;
+      if (card) {
+        card.classList.add("border-[#D7FF3E]", "bg-[#252514]");
+        card.classList.remove("border-[#2B2B31]", "bg-[#17171A]");
+        setSegmentProgress(card, 0, 0);
+      }
+    }
+
+    document.addEventListener("click", (e) => {
+      const t = e.target;
+      if (!(t instanceof HTMLElement)) return;
+
+      const trimBtn = t.closest("[data-trim-cut]");
+      if (trimBtn) { e.preventDefault(); e.stopPropagation(); const c = trimBtn.closest("[data-preview-cut]"); if (c) enterTrimMode(c); return; }
+
+      const exitBtn = t.closest("[data-trim-exit]");
+      if (exitBtn) { e.preventDefault(); e.stopPropagation(); exitTrimMode(); return; }
+
+      const tpBtn = t.closest("[data-set-trim-point]");
+      if (tpBtn) {
+        e.preventDefault(); e.stopPropagation();
+        const panel = tpBtn.closest("[data-trim-panel]");
+        if (!video || !panel) return;
+        const ms = Math.max(Math.round(video.currentTime * 1000), 0);
+        const si = panel.querySelector("[data-trim-start-ms]");
+        const ei = panel.querySelector("[data-trim-end-ms]");
+        if (!si || !ei) return;
+        if (tpBtn.dataset.setTrimPoint === "start") si.value = String(ms); else ei.value = String(ms);
+        updateTrimLabel(panel); return;
+      }
+
+      const resetBtn = t.closest("[data-trim-reset]");
+      if (resetBtn) {
+        e.preventDefault(); e.stopPropagation();
+        const panel  = resetBtn.closest("[data-trim-panel]");
+        const si     = panel?.querySelector("[data-trim-start-ms]");
+        const ei     = panel?.querySelector("[data-trim-end-ms]");
+        const origSi = panel?.querySelector("[data-trim-original-start-ms]");
+        const origEi = panel?.querySelector("[data-trim-original-end-ms]");
+        if (!panel || !si || !ei || !origSi || !origEi) return;
+        si.value = origSi.value; ei.value = origEi.value;
+        if (video) video.currentTime = Number(si.value || 0) / 1000;
+        updateTrimLabel(panel);
+      }
+    });
+
+    document.querySelectorAll("[data-preview-cut]").forEach((card) => {
+      card.addEventListener("click", (e) => {
+        const t = e.target;
+        if (!(t instanceof HTMLElement) || !video) return;
+        if (t.closest("form") || t.closest("[data-ignore-cut-preview]")) return;
+        const range = getCutRange(card);
+        previewStartSeconds = range.startSeconds;
+        previewEndSeconds   = range.endSeconds;
+        mainRangePreviewEnd = null;
+        video.currentTime   = previewStartSeconds;
+        setActivePreviewCard(card);
+        video.play().catch(() => {});
+      });
+
+      const track = card.querySelector("[data-cut-progress-track]");
+
+      card.querySelectorAll("[data-cut-trim-handle]").forEach((hBtn) => {
+        hBtn.addEventListener("pointerdown", (e) => {
+          if (trimmingCard !== card) return;
+          e.preventDefault(); e.stopPropagation();
+          draggingTrimHandle = hBtn.dataset.cutTrimHandle || "";
+          hBtn.setPointerCapture?.(e.pointerId);
+          setTrimPointFromTrack(card, draggingTrimHandle, e);
+        });
+      });
+
+      track?.addEventListener("pointerdown", (e) => {
+        if (!video) return;
+        if (e.target instanceof HTMLElement && e.target.closest("[data-cut-trim-handle]")) return;
+        e.preventDefault(); e.stopPropagation();
+        draggingProgress = true;
+        video.pause();
+        track.setPointerCapture?.(e.pointerId);
+        seekCutByPointer(card, e);
+      });
+      track?.addEventListener("pointermove", (e) => { if (!draggingProgress) return; e.preventDefault(); seekCutByPointer(card, e); });
+      track?.addEventListener("pointerup",   (e) => { if (!draggingProgress) return; e.preventDefault(); draggingProgress = false; seekCutByPointer(card, e); track.releasePointerCapture?.(e.pointerId); });
+      track?.addEventListener("pointercancel",(e) => { draggingProgress = false; track.releasePointerCapture?.(e.pointerId); });
+    });
+
+    document.addEventListener("pointermove", (e) => {
+      if (!draggingTrimHandle || !trimmingCard) return;
+      e.preventDefault();
+      setTrimPointFromTrack(trimmingCard, draggingTrimHandle, e);
+    });
+
+    document.addEventListener("pointerup", (e) => {
+      if (!draggingTrimHandle || !trimmingCard) return;
+      e.preventDefault();
+      trimmingCard.querySelector(`[data-cut-trim-handle="${draggingTrimHandle}"]`)?.releasePointerCapture?.(e.pointerId);
+      draggingTrimHandle = null;
+    });
+
+    // ── 确认弹窗 / 导出弹窗 ─────────────────────────────────
+    const exportDirSection = document.getElementById("cut-confirm-export-dir-section");
+    const exportDirInput   = document.getElementById("cut-confirm-export-dir");
+
+    function showConfirm(form, action) {
+      pendingForm = form; pendingAction = action;
+      const name = form.dataset.segmentName || "未命名片段";
+      if (confirmTitle) confirmTitle.textContent = action === "delete" ? "删除这个片段？" : "导出这个片段？";
+      if (confirmMsg)   confirmMsg.textContent   = action === "delete" ? "只会删除粗剪标记，不会删除原视频，也不会删除已经导出的文件。" : "会从原视频生成一个剪切版文件，目录不存在时自动创建。";
+      if (confirmName)  confirmName.textContent  = name;
+      if (submitConfirm) {
+        submitConfirm.textContent = action === "delete" ? "Delete" : "Export";
+        submitConfirm.classList.toggle("bg-[#D7FF3E]",   action !== "delete");
+        submitConfirm.classList.toggle("text-[#0E0E10]", action !== "delete");
+        submitConfirm.classList.toggle("bg-[#FF6B57]",   action === "delete");
+        submitConfirm.classList.toggle("text-white",      action === "delete");
+      }
+      // export 时显示目录输入框，delete 时隐藏
+      exportDirSection?.classList.toggle("hidden", action !== "export");
+      if (action === "export") exportDirInput?.focus();
+      confirmModal?.classList.remove("hidden");
+      body.classList.add("overflow-hidden");
+    }
+
+    function hideConfirm() {
+      confirmModal?.classList.add("hidden");
+      if (!exportModal || exportModal.classList.contains("hidden")) body.classList.remove("overflow-hidden");
+      pendingForm = null; pendingAction = "";
+    }
+
+    async function exportPendingForm() {
+      if (!pendingForm || !readyState || !packingState) return;
+      const form = pendingForm;
+      const customDir = exportDirInput?.value.trim() || "";
+      hideConfirm();
+      exportModal?.classList.remove("hidden");
+      packingState.classList.remove("hidden");
+      readyState.classList.add("hidden");
+      readyState.innerHTML = "";
+      body.classList.add("overflow-hidden");
+      try {
+        const formData = new FormData(form);
+        if (customDir) formData.set("export_dir", customDir);
+        const res  = await fetch(form.action, { method: "POST", body: formData, headers: { "X-Requested-With": "XMLHttpRequest" } });
+        const html = await res.text();
+        if (!res.ok) throw new Error(html || "导出失败");
+        readyState.innerHTML = html;
+      } catch (err) {
+        readyState.innerHTML = `<div class="px-5 py-5"><p class="text-lg font-medium tracking-tight text-white">导出失败</p><p class="mt-2 text-sm leading-6 text-[#f2b4b4]">${err.message || "请稍后再试。"}</p><div class="mt-4 flex justify-end"><button type="button" data-close-export class="rounded-xl border border-white/10 px-4 py-2 text-sm text-white transition hover:border-white/20">关闭</button></div></div>`;
+      } finally {
+        packingState.classList.add("hidden");
+        readyState.classList.remove("hidden");
+      }
+    }
+
+    document.querySelectorAll("[data-confirm-cut]").forEach((form) => {
+      form.addEventListener("submit", (e) => { e.preventDefault(); showConfirm(form, form.dataset.confirmCut || ""); });
+    });
+
+    cancelConfirm?.addEventListener("click", hideConfirm);
+    confirmModal?.addEventListener("click", (e) => { if (e.target === confirmModal) hideConfirm(); });
+    submitConfirm?.addEventListener("click", () => {
+      if (!pendingForm) return;
+      if (pendingAction === "delete") { pendingForm.submit(); return; }
+      exportPendingForm();
+    });
+    exportModal?.addEventListener("click", (e) => {
+      const t = e.target;
+      if (t === exportModal || (t instanceof HTMLElement && t.closest("[data-close-export]"))) {
+        exportModal.classList.add("hidden");
+        body.classList.remove("overflow-hidden");
+      }
+    });
+
+    // 粗剪导出目录浏览按钮
+    document.getElementById("pick-cut-export-dir-btn")?.addEventListener("click", async function () {
+      const input = document.getElementById("cut-confirm-export-dir");
+      const btn = this;
+      const orig = btn.textContent;
+      btn.disabled = true;
+      btn.textContent = "在 Finder 中选择…";
+      try {
+        const res = await fetch("/api/pick-folder");
+        if (!res.ok) {
+          throw new Error("文件夹选择接口请求失败");
+        }
+        const data = await res.json();
+        if (data.error) {
+          throw new Error(data.error);
+        }
+        if (!data.cancelled && data.path && input) input.value = data.path;
+      } catch (error) {
+        window.alert(error.message || "Finder 文件夹选择没有启动。");
+      }
+      btn.disabled = false;
+      btn.textContent = orig;
+    });
+  })();
+</script>
+{% endblock %}
