@@ -36,6 +36,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     and_,
+    case,
     create_engine,
     delete,
     event,
@@ -58,6 +59,7 @@ class LibraryRecord:
     id: int
     name: str
     clip_count: int = 0
+    pending_note_count: int = 0
     owner_user_id: int | None = None
 
 
@@ -103,6 +105,62 @@ class ClipCutSegmentRecord:
 
 
 @dataclass
+class StoryboardRecord:
+    id: int
+    library_id: int
+    title: str
+    brief_text: str
+    target_duration_seconds: int
+    tone_prompt: str
+    selected_clip_ids: list[int]
+    framework_text: str | None = None
+    core_message: str | None = None
+    emotional_arc_json: list[str] | None = None
+    story_plan: str | None = None
+    script_text: str | None = None
+    revision_prompt: str | None = None
+    status: str = "draft"
+    error_message: str | None = None
+    created_at: str | None = None
+    updated_at: str | None = None
+
+
+@dataclass
+class StoryboardItemRecord:
+    id: int
+    storyboard_id: int
+    clip_id: int
+    position: int
+    section_name: str
+    narrative_role: str
+    suggested_duration_seconds: int
+    script_line: str | None = None
+    reason: str | None = None
+
+
+@dataclass
+class StoryboardMessageRecord:
+    id: int
+    storyboard_id: int
+    role: str
+    content: str
+    reasoning_text: str | None = None
+    action_json: dict[str, Any] | None = None
+    created_at: str | None = None
+
+
+@dataclass
+class StoryboardRunRecord:
+    id: int
+    storyboard_id: int
+    run_type: str
+    status: str
+    reasoning_text: str | None = None
+    output_text: str | None = None
+    error_message: str | None = None
+
+
+@dataclass
 class ClipRecord:
     video_hash: str
     filename: str
@@ -127,6 +185,8 @@ class ClipRecord:
     comparison_scores_json: str | None = None
     comparison_error_message: str | None = None
     user_note: str | None = None
+    source_modified_at: float | None = None
+    note_status: str = "pending"
 
 
 @dataclass
@@ -235,6 +295,8 @@ clips = Table(
     Column("comparison_scores_json", Text),
     Column("comparison_error_message", Text),
     Column("user_note", Text),
+    Column("source_modified_at", Float),
+    Column("note_status", String(32), nullable=False, default="pending"),
     Column("is_favorite", Boolean, nullable=False, default=False),
     Column("rating", Integer, nullable=False, default=0),
     Column("created_at", DateTime, nullable=False),
@@ -275,6 +337,70 @@ clip_cut_segments = Table(
     Column("updated_at", DateTime, nullable=False),
 )
 
+storyboards = Table(
+    "storyboards",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("library_id", Integer, ForeignKey("libraries.id", ondelete="CASCADE"), nullable=False),
+    Column("title", String(255), nullable=False),
+    Column("brief_text", Text, nullable=False),
+    Column("target_duration_seconds", Integer, nullable=False),
+    Column("tone_prompt", Text, nullable=False),
+    Column("selected_clip_ids_json", JSON, nullable=False, default=list),
+    Column("framework_text", Text),
+    Column("core_message", Text),
+    Column("emotional_arc_json", JSON, nullable=False, default=list),
+    Column("story_plan", Text),
+    Column("script_text", Text),
+    Column("revision_prompt", Text),
+    Column("status", String(32), nullable=False, default="draft"),
+    Column("error_message", Text),
+    Column("created_at", DateTime, nullable=False),
+    Column("updated_at", DateTime, nullable=False),
+)
+
+storyboard_items = Table(
+    "storyboard_items",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("storyboard_id", Integer, ForeignKey("storyboards.id", ondelete="CASCADE"), nullable=False),
+    Column("clip_id", Integer, ForeignKey("clips.id", ondelete="CASCADE"), nullable=False),
+    Column("position", Integer, nullable=False),
+    Column("section_name", String(100), nullable=False),
+    Column("narrative_role", Text, nullable=False),
+    Column("suggested_duration_seconds", Integer, nullable=False),
+    Column("script_line", Text),
+    Column("reason", Text),
+    Column("created_at", DateTime, nullable=False),
+    Column("updated_at", DateTime, nullable=False),
+)
+
+storyboard_messages = Table(
+    "storyboard_messages",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("storyboard_id", Integer, ForeignKey("storyboards.id", ondelete="CASCADE"), nullable=False),
+    Column("role", String(32), nullable=False),
+    Column("content", Text, nullable=False),
+    Column("reasoning_text", Text),
+    Column("action_json", JSON),
+    Column("created_at", DateTime, nullable=False),
+)
+
+storyboard_runs = Table(
+    "storyboard_runs",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("storyboard_id", Integer, ForeignKey("storyboards.id", ondelete="CASCADE"), nullable=False),
+    Column("run_type", String(40), nullable=False),
+    Column("status", String(32), nullable=False),
+    Column("reasoning_text", Text),
+    Column("output_text", Text),
+    Column("error_message", Text),
+    Column("created_at", DateTime, nullable=False),
+    Column("updated_at", DateTime, nullable=False),
+)
+
 project_nodes = Table(
     "project_nodes",
     metadata,
@@ -308,6 +434,60 @@ recycled_clips = Table(
 
 def _utcnow() -> datetime:
     return datetime.now(UTC).replace(tzinfo=None)
+
+
+TAG_MERGE_RULES: list[tuple[str, tuple[str, ...]]] = [
+    ("第一人称", ("第一人称", "第一视角", "pov", "主观视角", "手持视角")),
+    ("人物口播", ("口播", "说话", "讲话", "采访", "讲解", "真人出镜", "人物出镜", "主播", "vlog")),
+    ("人物特写", ("人物特写", "人像", "脸部", "表情", "眼神", "半身", "近景人物")),
+    ("人物出镜", ("人物", "自拍", "合影", "合照", "互动", "人物互动", "朋友", "两人", "三人", "四人", "多人", "女生", "男生", "女孩", "男孩", "女子", "男子", "小孩", "情侣", "行人", "人群", "顾客", "游客", "服务员", "背影", "侧脸", "比耶", "笑")),
+    ("城市街头", ("街景", "街头", "城市", "街道", "城市街道", "马路", "路边", "店外", "商圈", "夜景", "夜间", "建筑", "楼宇", "人行道", "斑马线", "巷子", "桥", "成都")),
+    ("室内商业空间", ("室内", "咖啡店", "餐厅", "餐馆", "店铺", "商店", "室内店", "吧台", "展厅", "酒店", "商场", "办公室空间", "店内", "门店", "餐桌", "座位", "桌椅", "招牌", "理发店", "快餐店", "按摩室", "摊位", "内景", "桌前", "桌下", "宿舍", "床", "窗口", "文字墙", "灯具", "陈设", "菜单", "超市", "走廊", "舞蹈室", "露台")),
+    ("自然风景", ("自然", "风景", "山", "海", "湖", "河", "溪", "天空", "云", "日落", "日出", "森林", "草地", "草坪", "公园", "植物", "绿植", "蓝天", "天气", "窗外", "露天", "伞下", "动物")),
+    ("交通出行", ("车", "汽车", "地铁", "火车", "公交", "飞机", "机场", "车站", "骑行", "开车", "行驶", "通勤", "乘梯", "扶梯", "自动扶梯", "公路", "交通工具", "舷窗", "接机", "机翼", "机舱", "航空配餐", "线路图", "下行")),
+    ("美食饮品", ("美食", "食物", "吃饭", "餐食", "甜品", "咖啡", "饮品", "饮食", "酒", "茶", "烹饪", "厨房", "串串", "火锅", "小吃", "用餐", "餐桌", "菜品", "饮料", "夹菜", "筷子", "粉条", "食材", "冰粉", "可乐", "吃", "就餐", "吃喝", "果盘", "汉堡", "涮菜", "烤串", "烧烤摊", "热油", "煎蛋", "煮", "薯条", "陈麻婆豆腐", "面馆")),
+    ("工作学习", ("工作", "办公", "电脑", "键盘", "会议", "学习", "阅读", "书", "笔记", "写字", "创作", "毕业答辩", "校园", "操场")),
+    ("居家生活", ("居家", "家里", "客厅", "卧室", "生活方式", "日常", "家居", "收纳", "清洁")),
+    ("旅行记录", ("旅行", "旅游", "出游", "景点", "民宿", "酒店", "行李", "旅途", "打卡")),
+    ("运动户外", ("运动", "健身", "跑步", "徒步", "爬山", "户外", "露营", "滑雪", "游泳")),
+    ("人物动作", ("走动", "行走", "挥手", "拍照", "聊天", "观看", "交流", "交谈", "休息", "准备", "吐槽", "听歌", "唱歌", "手", "手势", "手持", "手舀", "手指", "手部动作", "指", "指示", "操作", "整理头发", "移动", "翻找", "选择", "姿势", "服务", "表演")),
+    ("产品物件", ("产品", "商品", "物品", "物件", "设备", "手机", "相机", "包装", "开箱", "特写物", "展示", "卡片", "平板", "屏幕", "打印机", "品牌", "提示牌", "摆放", "旧物", "灯光作品", "照片", "耳机", "胶片", "鞋子", "文字")),
+    ("休闲娱乐", ("ktv", "麻将", "聚餐", "综艺", "娱乐", "唱歌", "听歌", "休闲区")),
+    ("情绪氛围", ("氛围", "情绪", "治愈", "松弛", "温暖", "孤独", "安静", "热闹", "高级感", "电影感", "暗环境")),
+    ("构图景别", ("特写", "近景", "中景", "远景", "全景", "俯拍", "仰拍", "俯瞰", "跟拍", "慢动作", "静态")),
+    ("转场空镜", ("空镜", "转场", "过渡", "环境镜头", "建立镜头", "细节镜头", "b-roll", "broll")),
+]
+
+TAG_DROP_WORDS = {"视频", "素材", "镜头", "画面", "内容", "场景", "无", "其他"}
+
+
+def normalize_clip_tag(tag: str) -> str | None:
+    """把细碎标签合并成更适合筛选的大类。"""
+    cleaned = re.sub(r"\s+", "", str(tag).strip().lower())
+    cleaned = cleaned.strip("#＃,，.。;；:：/\\|_-")
+    if not cleaned or cleaned in TAG_DROP_WORDS:
+        return None
+
+    for canonical, keywords in TAG_MERGE_RULES:
+        if cleaned == canonical.lower():
+            return canonical
+        if any(keyword.lower() in cleaned for keyword in keywords):
+            return canonical
+
+    return str(tag).strip()
+
+
+def normalize_clip_tags(tags: list[str]) -> list[str]:
+    """归一化并去重一组标签。"""
+    normalized_tags: list[str] = []
+    seen_tags: set[str] = set()
+    for tag in tags:
+        normalized_tag = normalize_clip_tag(tag)
+        if not normalized_tag or normalized_tag in seen_tags:
+            continue
+        seen_tags.add(normalized_tag)
+        normalized_tags.append(normalized_tag)
+    return normalized_tags
 
 
 def _hash_password(password: str, *, salt: str | None = None) -> str:
@@ -474,12 +654,27 @@ def _ensure_legacy_columns(conn: Connection) -> None:
         "comparison_scores_json": "ALTER TABLE clips ADD COLUMN comparison_scores_json TEXT",
         "comparison_error_message": "ALTER TABLE clips ADD COLUMN comparison_error_message TEXT",
         "user_note": "ALTER TABLE clips ADD COLUMN user_note TEXT",
+        "source_modified_at": "ALTER TABLE clips ADD COLUMN source_modified_at FLOAT",
+        "note_status": "ALTER TABLE clips ADD COLUMN note_status TEXT NOT NULL DEFAULT 'pending'",
         "is_favorite": "ALTER TABLE clips ADD COLUMN is_favorite BOOLEAN NOT NULL DEFAULT 0",
         "rating": "ALTER TABLE clips ADD COLUMN rating INTEGER NOT NULL DEFAULT 0",
     }
     for column_name, ddl in statements.items():
         if column_name not in existing:
             conn.execute(text(ddl))
+    conn.execute(
+        text(
+            "UPDATE clips SET note_status = 'done' "
+            "WHERE user_note IS NOT NULL "
+            "AND TRIM(user_note) <> '' "
+            "AND note_status = 'pending'"
+        )
+    )
+
+    if _table_exists(conn, "storyboards"):
+        storyboard_columns = _column_names(conn, "storyboards")
+        if "framework_text" not in storyboard_columns:
+            conn.execute(text("ALTER TABLE storyboards ADD COLUMN framework_text TEXT"))
 
     if _table_exists(conn, "libraries"):
         library_columns = _column_names(conn, "libraries")
@@ -670,6 +865,32 @@ def _ensure_root_refs_locked(conn: Connection) -> None:
             _insert_clip_node_ref_if_missing(conn, clip_id, root_id)
 
 
+def _normalize_existing_clip_tags_locked(conn: Connection) -> None:
+    """把历史标签按当前合并规则重写一遍。"""
+    rows = conn.execute(
+        select(clip_tags.c.clip_id, clip_tags.c.tag).order_by(clip_tags.c.clip_id.asc(), clip_tags.c.id.asc())
+    ).mappings().all()
+    if not rows:
+        return
+
+    tags_by_clip: dict[int, list[str]] = {}
+    for row in rows:
+        tags_by_clip.setdefault(int(row["clip_id"]), []).append(str(row["tag"]))
+
+    changed_clip_ids: list[int] = []
+    for clip_id, raw_tags in tags_by_clip.items():
+        normalized_tags = normalize_clip_tags(raw_tags)
+        if normalized_tags == raw_tags:
+            continue
+        changed_clip_ids.append(clip_id)
+        conn.execute(delete(clip_tags).where(clip_tags.c.clip_id == clip_id))
+        for tag in normalized_tags:
+            conn.execute(insert(clip_tags).values(clip_id=clip_id, tag=tag))
+
+    if changed_clip_ids:
+        conn.execute(update(clips).where(clips.c.id.in_(changed_clip_ids)).values(updated_at=_utcnow()))
+
+
 def init_db(db_path: Path = _DB_PATH) -> Engine:
     engine = get_engine(db_path)
 
@@ -684,6 +905,7 @@ def init_db(db_path: Path = _DB_PATH) -> Engine:
                 _ensure_root_nodes_locked(conn)
                 _normalize_project_roots_locked(conn)
                 _ensure_root_refs_locked(conn)
+                _normalize_existing_clip_tags_locked(conn)
                 _purge_expired_recycled_clips_locked(conn)
         return engine
 
@@ -707,6 +929,7 @@ def _row_to_library(row: RowMapping) -> LibraryRecord:
         id=int(row["id"]),
         name=str(row["name"]),
         clip_count=int(row.get("clip_count", 0) or 0),
+        pending_note_count=int(row.get("pending_note_count", 0) or 0),
         owner_user_id=int(row["owner_user_id"]) if row.get("owner_user_id") is not None else None,
     )
 
@@ -794,6 +1017,14 @@ def list_libraries(
         select(
             clips.c.library_id.label("library_id"),
             func.count(func.distinct(clips.c.id)).label("clip_count"),
+            func.count(
+                func.distinct(
+                    case(
+                        (clips.c.note_status == "pending", clips.c.id),
+                        else_=None,
+                    )
+                )
+            ).label("pending_note_count"),
         )
         .select_from(
             clips.outerjoin(recycled_clips, recycled_clips.c.clip_id == clips.c.id)
@@ -812,6 +1043,7 @@ def list_libraries(
             libraries.c.name,
             libraries.c.owner_user_id,
             func.coalesce(clip_count_subquery.c.clip_count, 0).label("clip_count"),
+            func.coalesce(clip_count_subquery.c.pending_note_count, 0).label("pending_note_count"),
         )
         .select_from(
             libraries.outerjoin(
@@ -1023,6 +1255,37 @@ def delete_clips(clip_ids: list[int], library_id: int, db_path: Path = _DB_PATH)
     return _with_retry(_write)
 
 
+def clip_exists_in_library_by_hash(video_hash: str, library_id: int, db_path: Path = _DB_PATH) -> bool:
+    """判断当前素材库是否已有同一内容的视频。"""
+    row = _fetch_one(
+        select(clips.c.id)
+        .select_from(clips.outerjoin(recycled_clips, recycled_clips.c.clip_id == clips.c.id))
+        .where(
+            clips.c.video_hash == video_hash,
+            clips.c.library_id == library_id,
+            recycled_clips.c.clip_id.is_(None),
+        )
+        .limit(1),
+        db_path=db_path,
+    )
+    return row is not None
+
+
+def clip_exists_by_hash(video_hash: str, db_path: Path = _DB_PATH) -> bool:
+    """判断数据库中是否已有同一内容的视频。"""
+    row = _fetch_one(
+        select(clips.c.id)
+        .select_from(clips.outerjoin(recycled_clips, recycled_clips.c.clip_id == clips.c.id))
+        .where(
+            clips.c.video_hash == video_hash,
+            recycled_clips.c.clip_id.is_(None),
+        )
+        .limit(1),
+        db_path=db_path,
+    )
+    return row is not None
+
+
 def save_clip(record: ClipRecord, db_path: Path = _DB_PATH) -> int:
     engine = get_engine(db_path)
 
@@ -1058,6 +1321,8 @@ def save_clip(record: ClipRecord, db_path: Path = _DB_PATH) -> int:
                     "comparison_scores_json": record.comparison_scores_json,
                     "comparison_error_message": record.comparison_error_message,
                     "user_note": record.user_note if record.user_note is not None else (existing_row["user_note"] if existing_row else None),
+                    "source_modified_at": record.source_modified_at,
+                    "note_status": record.note_status,
                     "updated_at": now,
                 }
 
@@ -1075,12 +1340,11 @@ def save_clip(record: ClipRecord, db_path: Path = _DB_PATH) -> int:
 
                 conn.execute(delete(clip_tags).where(clip_tags.c.clip_id == clip_id))
                 seen_tags: set[str] = set()
-                for tag in record.tags or []:
-                    cleaned_tag = str(tag).strip()
-                    if not cleaned_tag or cleaned_tag in seen_tags:
+                for tag in normalize_clip_tags(record.tags or []):
+                    if tag in seen_tags:
                         continue
-                    seen_tags.add(cleaned_tag)
-                    conn.execute(insert(clip_tags).values(clip_id=clip_id, tag=cleaned_tag))
+                    seen_tags.add(tag)
+                    conn.execute(insert(clip_tags).values(clip_id=clip_id, tag=tag))
 
                 root_row = conn.execute(
                     select(project_nodes.c.id).where(
@@ -1201,14 +1465,7 @@ def append_clip_tags(
     new_tags: list[str],
     db_path: Path = _DB_PATH,
 ) -> None:
-    cleaned_tags: list[str] = []
-    seen_tags: set[str] = set()
-    for tag in new_tags:
-        cleaned_tag = tag.strip()
-        if not cleaned_tag or cleaned_tag in seen_tags:
-            continue
-        seen_tags.add(cleaned_tag)
-        cleaned_tags.append(cleaned_tag)
+    cleaned_tags = normalize_clip_tags(new_tags)
 
     if not cleaned_tags:
         raise ValueError("请至少填写一个标签")
@@ -1252,7 +1509,37 @@ def update_clip_note(
                 result = conn.execute(
                     update(clips)
                     .where(clips.c.id == clip_id)
-                    .values(user_note=cleaned_note or None, updated_at=_utcnow())
+                    .values(
+                        user_note=cleaned_note or None,
+                        note_status="done" if cleaned_note else "pending",
+                        updated_at=_utcnow(),
+                    )
+                )
+                if result.rowcount == 0:
+                    raise ValueError("素材不存在")
+
+    _with_retry(_write)
+
+
+def update_clip_note_status(
+    clip_id: int,
+    note_status: str,
+    db_path: Path = _DB_PATH,
+) -> None:
+    """更新素材的创作备注状态。"""
+    cleaned_status = note_status.strip()
+    if cleaned_status not in {"pending", "done", "skipped"}:
+        raise ValueError("备注状态无效")
+
+    engine = get_engine(db_path)
+
+    def _write() -> None:
+        with _DB_LOCK:
+            with engine.begin() as conn:
+                result = conn.execute(
+                    update(clips)
+                    .where(clips.c.id == clip_id)
+                    .values(note_status=cleaned_status, updated_at=_utcnow())
                 )
                 if result.rowcount == 0:
                     raise ValueError("素材不存在")
@@ -1446,6 +1733,498 @@ def update_clip_cut_segment_export_path(
                 )
                 if result.rowcount == 0:
                     raise ValueError("粗剪片段不存在")
+
+    _with_retry(_write)
+
+
+def _row_to_storyboard(row: RowMapping) -> StoryboardRecord:
+    return StoryboardRecord(
+        id=int(row["id"]),
+        library_id=int(row["library_id"]),
+        title=str(row["title"]),
+        brief_text=str(row["brief_text"]),
+        target_duration_seconds=int(row["target_duration_seconds"]),
+        tone_prompt=str(row["tone_prompt"]),
+        selected_clip_ids=[int(item) for item in (row["selected_clip_ids_json"] or [])],
+        framework_text=str(row["framework_text"]) if row.get("framework_text") else None,
+        core_message=str(row["core_message"]) if row.get("core_message") else None,
+        emotional_arc_json=[str(item) for item in (row["emotional_arc_json"] or [])],
+        story_plan=str(row["story_plan"]) if row.get("story_plan") else None,
+        script_text=str(row["script_text"]) if row.get("script_text") else None,
+        revision_prompt=str(row["revision_prompt"]) if row.get("revision_prompt") else None,
+        status=str(row.get("status") or "draft"),
+        error_message=str(row["error_message"]) if row.get("error_message") else None,
+        created_at=str(row["created_at"]) if row.get("created_at") else None,
+        updated_at=str(row["updated_at"]) if row.get("updated_at") else None,
+    )
+
+
+def create_storyboard(
+    *,
+    library_id: int,
+    title: str,
+    brief_text: str,
+    target_duration_seconds: int,
+    tone_prompt: str,
+    selected_clip_ids: list[int],
+    db_path: Path = _DB_PATH,
+) -> StoryboardRecord:
+    """创建一次素材库级故事线方案。"""
+    cleaned_brief = brief_text.strip()
+    if not cleaned_brief:
+        raise ValueError("请先填写这条视频想表达的东西。")
+    cleaned_title = title.strip() or "未命名故事线"
+    cleaned_tone = tone_prompt.strip() or "第一人称、口语化、像真实 vlog 旁白，不要鸡汤，不要广告腔。"
+    safe_duration = max(15, min(int(target_duration_seconds), 1200))
+    unique_clip_ids = list(dict.fromkeys(int(item) for item in selected_clip_ids if int(item) > 0))
+    if not unique_clip_ids:
+        raise ValueError("请至少选择一条素材。")
+
+    engine = get_engine(db_path)
+
+    def _write() -> int:
+        with _DB_LOCK:
+            with engine.begin() as conn:
+                library_row = conn.execute(select(libraries.c.id).where(libraries.c.id == library_id)).first()
+                if library_row is None:
+                    raise ValueError("素材库不存在。")
+
+                valid_count_row = conn.execute(
+                    select(func.count(clips.c.id).label("count"))
+                    .select_from(clips.outerjoin(recycled_clips, recycled_clips.c.clip_id == clips.c.id))
+                    .where(
+                        clips.c.library_id == library_id,
+                        clips.c.id.in_(unique_clip_ids),
+                        clips.c.status == "done",
+                        recycled_clips.c.clip_id.is_(None),
+                    )
+                ).mappings().first()
+                if int(valid_count_row["count"] or 0) == 0:
+                    raise ValueError("选中的素材不属于当前素材库，或还不可用于生成故事线。")
+
+                now = _utcnow()
+                result = conn.execute(
+                    insert(storyboards).values(
+                        library_id=library_id,
+                        title=cleaned_title,
+                        brief_text=cleaned_brief,
+                        target_duration_seconds=safe_duration,
+                        tone_prompt=cleaned_tone,
+                        selected_clip_ids_json=unique_clip_ids,
+                        emotional_arc_json=[],
+                        status="framework_pending",
+                        created_at=now,
+                        updated_at=now,
+                    )
+                )
+                return int(result.inserted_primary_key[0])
+
+    storyboard_id = _with_retry(_write)
+    storyboard = get_storyboard(storyboard_id, db_path)
+    if storyboard is None:
+        raise ValueError("故事线创建失败。")
+    return storyboard
+
+
+def update_storyboard_status(
+    storyboard_id: int,
+    status: str,
+    *,
+    revision_prompt: str | None = None,
+    target_duration_seconds: int | None = None,
+    tone_prompt: str | None = None,
+    error_message: str | None = None,
+    db_path: Path = _DB_PATH,
+) -> None:
+    """更新故事线生成阶段。"""
+    engine = get_engine(db_path)
+
+    def _write() -> None:
+        with _DB_LOCK:
+            with engine.begin() as conn:
+                values: dict[str, Any] = {
+                    "status": status,
+                    "error_message": error_message,
+                    "updated_at": _utcnow(),
+                }
+                if revision_prompt is not None:
+                    values["revision_prompt"] = revision_prompt.strip() or None
+                if target_duration_seconds is not None:
+                    values["target_duration_seconds"] = max(15, min(int(target_duration_seconds), 1200))
+                if tone_prompt is not None:
+                    values["tone_prompt"] = tone_prompt.strip() or "第一人称、口语化、像真实 vlog 旁白，不要鸡汤，不要广告腔。"
+                result = conn.execute(
+                    update(storyboards)
+                    .where(storyboards.c.id == storyboard_id)
+                    .values(**values)
+                )
+                if result.rowcount == 0:
+                    raise ValueError("故事线不存在。")
+
+    _with_retry(_write)
+
+
+def update_storyboard_framework(
+    *,
+    storyboard_id: int,
+    title: str,
+    core_message: str,
+    emotional_arc: list[str],
+    framework_text: str,
+    revision_prompt: str | None = None,
+    db_path: Path = _DB_PATH,
+) -> None:
+    """保存待确认的叙事框架。"""
+    engine = get_engine(db_path)
+
+    def _write() -> None:
+        with _DB_LOCK:
+            with engine.begin() as conn:
+                result = conn.execute(
+                    update(storyboards)
+                    .where(storyboards.c.id == storyboard_id)
+                    .values(
+                        title=title.strip() or "未命名故事线",
+                        core_message=core_message.strip(),
+                        emotional_arc_json=[item.strip() for item in emotional_arc if item.strip()],
+                        framework_text=framework_text.strip(),
+                        revision_prompt=revision_prompt.strip() if revision_prompt else None,
+                        status="framework_done",
+                        error_message=None,
+                        updated_at=_utcnow(),
+                    )
+                )
+                if result.rowcount == 0:
+                    raise ValueError("故事线不存在。")
+
+    _with_retry(_write)
+
+
+def update_storyboard_result(
+    *,
+    storyboard_id: int,
+    title: str,
+    core_message: str,
+    emotional_arc: list[str],
+    story_plan: str,
+    script_text: str,
+    items: list[StoryboardItemRecord],
+    revision_prompt: str | None = None,
+    db_path: Path = _DB_PATH,
+) -> None:
+    """保存 AI 生成或修改后的故事线结果。"""
+    engine = get_engine(db_path)
+
+    def _write() -> None:
+        with _DB_LOCK:
+            with engine.begin() as conn:
+                now = _utcnow()
+                result = conn.execute(
+                    update(storyboards)
+                    .where(storyboards.c.id == storyboard_id)
+                    .values(
+                        title=title.strip() or "未命名故事线",
+                        core_message=core_message.strip(),
+                        emotional_arc_json=[item.strip() for item in emotional_arc if item.strip()],
+                        story_plan=story_plan.strip(),
+                        script_text=script_text.strip(),
+                        revision_prompt=revision_prompt.strip() if revision_prompt else None,
+                        status="done",
+                        error_message=None,
+                        updated_at=now,
+                    )
+                )
+                if result.rowcount == 0:
+                    raise ValueError("故事线不存在。")
+
+                conn.execute(delete(storyboard_items).where(storyboard_items.c.storyboard_id == storyboard_id))
+                for item in sorted(items, key=lambda record: record.position):
+                    conn.execute(
+                        insert(storyboard_items).values(
+                            storyboard_id=storyboard_id,
+                            clip_id=item.clip_id,
+                            position=item.position,
+                            section_name=item.section_name,
+                            narrative_role=item.narrative_role,
+                            suggested_duration_seconds=max(1, int(item.suggested_duration_seconds)),
+                            script_line=item.script_line,
+                            reason=item.reason,
+                            created_at=now,
+                            updated_at=now,
+                        )
+                    )
+
+    _with_retry(_write)
+
+
+def update_storyboard_script(
+    *,
+    storyboard_id: int,
+    script_text: str,
+    db_path: Path = _DB_PATH,
+) -> None:
+    """保存用户手动编辑后的完整脚本。"""
+    cleaned_script = script_text.strip()
+    engine = get_engine(db_path)
+
+    def _write() -> None:
+        with _DB_LOCK:
+            with engine.begin() as conn:
+                result = conn.execute(
+                    update(storyboards)
+                    .where(storyboards.c.id == storyboard_id)
+                    .values(
+                        script_text=cleaned_script,
+                        status="done",
+                        error_message=None,
+                        updated_at=_utcnow(),
+                    )
+                )
+                if result.rowcount == 0:
+                    raise ValueError("故事线不存在。")
+
+    _with_retry(_write)
+
+
+def update_storyboard_error(storyboard_id: int, error_message: str, db_path: Path = _DB_PATH) -> None:
+    engine = get_engine(db_path)
+
+    def _write() -> None:
+        with _DB_LOCK:
+            with engine.begin() as conn:
+                conn.execute(
+                    update(storyboards)
+                    .where(storyboards.c.id == storyboard_id)
+                    .values(status="failed", error_message=error_message, updated_at=_utcnow())
+                )
+
+    _with_retry(_write)
+
+
+def get_storyboard(storyboard_id: int, db_path: Path = _DB_PATH) -> StoryboardRecord | None:
+    row = _fetch_one(
+        select(
+            storyboards.c.id,
+            storyboards.c.library_id,
+            storyboards.c.title,
+            storyboards.c.brief_text,
+            storyboards.c.target_duration_seconds,
+            storyboards.c.tone_prompt,
+            storyboards.c.selected_clip_ids_json,
+            storyboards.c.framework_text,
+            storyboards.c.core_message,
+            storyboards.c.emotional_arc_json,
+            storyboards.c.story_plan,
+            storyboards.c.script_text,
+            storyboards.c.revision_prompt,
+            storyboards.c.status,
+            storyboards.c.error_message,
+            storyboards.c.created_at,
+            storyboards.c.updated_at,
+        ).where(storyboards.c.id == storyboard_id),
+        db_path=db_path,
+    )
+    return _row_to_storyboard(row) if row is not None else None
+
+
+def list_storyboards(
+    *,
+    library_ids: list[int] | None = None,
+    limit: int = 20,
+    db_path: Path = _DB_PATH,
+) -> list[StoryboardRecord]:
+    """按素材库列出故事项目。"""
+    filters: list[Any] = []
+    if library_ids is not None:
+        safe_ids = [int(item) for item in library_ids if int(item) > 0]
+        if not safe_ids:
+            return []
+        filters.append(storyboards.c.library_id.in_(safe_ids))
+    statement = select(
+        storyboards.c.id,
+        storyboards.c.library_id,
+        storyboards.c.title,
+        storyboards.c.brief_text,
+        storyboards.c.target_duration_seconds,
+        storyboards.c.tone_prompt,
+        storyboards.c.selected_clip_ids_json,
+        storyboards.c.framework_text,
+        storyboards.c.core_message,
+        storyboards.c.emotional_arc_json,
+        storyboards.c.story_plan,
+        storyboards.c.script_text,
+        storyboards.c.revision_prompt,
+        storyboards.c.status,
+        storyboards.c.error_message,
+        storyboards.c.created_at,
+        storyboards.c.updated_at,
+    ).order_by(storyboards.c.updated_at.desc(), storyboards.c.id.desc())
+    if filters:
+        statement = statement.where(and_(*filters))
+    if limit > 0:
+        statement = statement.limit(limit)
+    rows = _fetch_all(statement, db_path=db_path)
+    return [_row_to_storyboard(row) for row in rows]
+
+
+def list_storyboard_items(storyboard_id: int, db_path: Path = _DB_PATH) -> list[StoryboardItemRecord]:
+    rows = _fetch_all(
+        select(
+            storyboard_items.c.id,
+            storyboard_items.c.storyboard_id,
+            storyboard_items.c.clip_id,
+            storyboard_items.c.position,
+            storyboard_items.c.section_name,
+            storyboard_items.c.narrative_role,
+            storyboard_items.c.suggested_duration_seconds,
+            storyboard_items.c.script_line,
+            storyboard_items.c.reason,
+        )
+        .where(storyboard_items.c.storyboard_id == storyboard_id)
+        .order_by(storyboard_items.c.position.asc(), storyboard_items.c.id.asc()),
+        db_path=db_path,
+    )
+    return [
+        StoryboardItemRecord(
+            id=int(row["id"]),
+            storyboard_id=int(row["storyboard_id"]),
+            clip_id=int(row["clip_id"]),
+            position=int(row["position"]),
+            section_name=str(row["section_name"]),
+            narrative_role=str(row["narrative_role"]),
+            suggested_duration_seconds=int(row["suggested_duration_seconds"]),
+            script_line=str(row["script_line"]) if row.get("script_line") else None,
+            reason=str(row["reason"]) if row.get("reason") else None,
+        )
+        for row in rows
+    ]
+
+
+def add_storyboard_message(
+    *,
+    storyboard_id: int,
+    role: str,
+    content: str,
+    reasoning_text: str | None = None,
+    action_json: dict[str, Any] | None = None,
+    db_path: Path = _DB_PATH,
+) -> StoryboardMessageRecord:
+    """保存一条导演 Agent 对话消息。"""
+    cleaned_role = role.strip()
+    cleaned_content = content.strip()
+    if cleaned_role not in {"user", "assistant", "system"}:
+        raise ValueError("消息角色无效。")
+    if not cleaned_content:
+        raise ValueError("消息内容不能为空。")
+    engine = get_engine(db_path)
+
+    def _write() -> int:
+        with _DB_LOCK:
+            with engine.begin() as conn:
+                now = _utcnow()
+                result = conn.execute(
+                    insert(storyboard_messages).values(
+                        storyboard_id=storyboard_id,
+                        role=cleaned_role,
+                        content=cleaned_content,
+                        reasoning_text=reasoning_text.strip() if reasoning_text else None,
+                        action_json=action_json,
+                        created_at=now,
+                    )
+                )
+                return int(result.inserted_primary_key[0])
+
+    message_id = _with_retry(_write)
+    messages = list_storyboard_messages(storyboard_id, db_path)
+    for message in messages:
+        if message.id == message_id:
+            return message
+    raise ValueError("消息保存失败。")
+
+
+def list_storyboard_messages(storyboard_id: int, db_path: Path = _DB_PATH) -> list[StoryboardMessageRecord]:
+    """读取导演 Agent 对话历史。"""
+    rows = _fetch_all(
+        select(
+            storyboard_messages.c.id,
+            storyboard_messages.c.storyboard_id,
+            storyboard_messages.c.role,
+            storyboard_messages.c.content,
+            storyboard_messages.c.reasoning_text,
+            storyboard_messages.c.action_json,
+            storyboard_messages.c.created_at,
+        )
+        .where(storyboard_messages.c.storyboard_id == storyboard_id)
+        .order_by(storyboard_messages.c.id.asc()),
+        db_path=db_path,
+    )
+    return [
+        StoryboardMessageRecord(
+            id=int(row["id"]),
+            storyboard_id=int(row["storyboard_id"]),
+            role=str(row["role"]),
+            content=str(row["content"]),
+            reasoning_text=str(row["reasoning_text"]) if row.get("reasoning_text") else None,
+            action_json=dict(row["action_json"]) if row.get("action_json") else None,
+            created_at=str(row["created_at"]) if row.get("created_at") else None,
+        )
+        for row in rows
+    ]
+
+
+def create_storyboard_run(
+    *,
+    storyboard_id: int,
+    run_type: str,
+    db_path: Path = _DB_PATH,
+) -> int:
+    """记录一次 Agent 调用。"""
+    engine = get_engine(db_path)
+
+    def _write() -> int:
+        with _DB_LOCK:
+            with engine.begin() as conn:
+                now = _utcnow()
+                result = conn.execute(
+                    insert(storyboard_runs).values(
+                        storyboard_id=storyboard_id,
+                        run_type=run_type,
+                        status="running",
+                        created_at=now,
+                        updated_at=now,
+                    )
+                )
+                return int(result.inserted_primary_key[0])
+
+    return _with_retry(_write)
+
+
+def update_storyboard_run(
+    run_id: int,
+    *,
+    status: str,
+    reasoning_text: str | None = None,
+    output_text: str | None = None,
+    error_message: str | None = None,
+    db_path: Path = _DB_PATH,
+) -> None:
+    """更新 Agent 调用状态。"""
+    engine = get_engine(db_path)
+
+    def _write() -> None:
+        with _DB_LOCK:
+            with engine.begin() as conn:
+                conn.execute(
+                    update(storyboard_runs)
+                    .where(storyboard_runs.c.id == run_id)
+                    .values(
+                        status=status,
+                        reasoning_text=reasoning_text.strip() if reasoning_text else None,
+                        output_text=output_text.strip() if output_text else None,
+                        error_message=error_message.strip() if error_message else None,
+                        updated_at=_utcnow(),
+                    )
+                )
 
     _with_retry(_write)
 
@@ -2035,6 +2814,9 @@ def query_clips(
             clips.c.comparison_error_message,
             clips.c.is_favorite,
             clips.c.rating,
+            clips.c.user_note,
+            clips.c.source_modified_at,
+            clips.c.note_status,
         )
         .select_from(clips.outerjoin(recycled_clips, recycled_clips.c.clip_id == clips.c.id))
         .where(and_(*filters))
@@ -2092,6 +2874,9 @@ def query_clip_card(clip_id: int, db_path: Path = _DB_PATH) -> dict[str, Any] | 
             clips.c.comparison_error_message,
             clips.c.is_favorite,
             clips.c.rating,
+            clips.c.user_note,
+            clips.c.source_modified_at,
+            clips.c.note_status,
         ).where(clips.c.id == clip_id),
         db_path=db_path,
     )
@@ -2160,6 +2945,8 @@ def query_clip_detail(clip_id: int, db_path: Path = _DB_PATH) -> dict[str, Any] 
             clips.c.comparison_scores_json,
             clips.c.comparison_error_message,
             clips.c.user_note,
+            clips.c.source_modified_at,
+            clips.c.note_status,
             libraries.c.name.label("library_name"),
         )
         .select_from(clips.outerjoin(libraries, libraries.c.id == clips.c.library_id))
@@ -2206,6 +2993,9 @@ def query_similar_clips(
             clips.c.comparison_status,
             clips.c.comparison_scores_json,
             clips.c.comparison_error_message,
+            clips.c.user_note,
+            clips.c.source_modified_at,
+            clips.c.note_status,
         )
         .select_from(clips.outerjoin(recycled_clips, recycled_clips.c.clip_id == clips.c.id))
         .where(

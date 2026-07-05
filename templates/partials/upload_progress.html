@@ -1,0 +1,45 @@
+{% if active_upload_job %}
+{% set summary = active_upload_summary %}
+<section
+  class="mb-6 rounded-[20px] border border-[#2A2A30] bg-[#17171A] px-4 py-4"
+  {% if active_upload_job.status != "completed" %}
+  hx-get="/upload/progress?library_id={{ current_library_id }}"
+  hx-trigger="every 2s"
+  hx-target="#upload-progress-panel"
+  hx-swap="innerHTML"
+  {% endif %}
+>
+  <div class="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+    <div class="min-w-0">
+      <p class="text-[10px] uppercase tracking-[0.18em] text-[#8A8A92]">Upload Progress</p>
+      <p class="mt-2 truncate text-sm text-white">
+        {{ active_upload_job.library_name }} / {{ active_upload_job.batch_name }}
+      </p>
+      <p class="mt-1 text-xs text-[#8A8A92]">{{ active_upload_job.message }}</p>
+    </div>
+    <div class="min-w-[260px] flex-1 lg:max-w-[420px]">
+      <div class="mb-2 flex items-center justify-between text-sm">
+        <span class="text-white">已上传 {{ summary.done }} / {{ summary.total }} 条</span>
+        <span class="text-[#D7FF3E]">{{ summary.progress }}%</span>
+      </div>
+      <div class="h-2 overflow-hidden rounded-full bg-[#2A2A30]">
+        <div class="h-full rounded-full bg-[#D7FF3E] transition-all duration-300" style="width: {{ summary.progress }}%;"></div>
+      </div>
+      <p class="mt-2 text-xs text-[#8A8A92]">
+        跳过 {{ summary.skipped }} 条 · 失败 {{ summary.failed }} 条
+        {% if summary.has_eta %}
+        · 预计剩余 {{ format_eta_text(summary.eta_seconds) }}
+        {% else %}
+        · 预计剩余 正在估算
+        {% endif %}
+      </p>
+    </div>
+    <a
+      href="/upload?library_id={{ active_upload_job.library_id }}"
+      class="inline-flex items-center justify-center rounded-xl border border-[#3A3A42] px-4 py-2.5 text-sm text-white transition hover:border-white/20"
+    >
+      查看详情
+    </a>
+  </div>
+</section>
+{% endif %}

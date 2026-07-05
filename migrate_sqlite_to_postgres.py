@@ -14,6 +14,8 @@ TABLE_ORDER = [
     "clips",
     "clip_tags",
     "transcripts",
+    "storyboards",
+    "storyboard_items",
     "clip_node_refs",
     "recycled_clips",
 ]

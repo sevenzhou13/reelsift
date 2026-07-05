@@ -1,0 +1,435 @@
+{% extends "base.html" %}
+{% block content %}
+<main class="mx-auto grid max-w-[1500px] gap-5 px-4 py-5 sm:px-6 lg:grid-cols-[minmax(0,1fr)_400px] lg:px-8">
+  <div class="min-w-0">
+  <section class="mb-4 flex flex-col gap-3 border-b border-[#25252B] pb-4 lg:flex-row lg:items-center lg:justify-between">
+    <div class="min-w-0">
+      <p class="text-[10px] uppercase tracking-[0.18em] text-[#8A8A92]">Story Project</p>
+      <h1 class="mt-1 truncate text-2xl font-medium text-white">{{ storyboard.title }}</h1>
+      <p class="mt-2 text-sm leading-6 text-[#8A8A92]">{{ selected_clips|length }} 条候选素材 / {{ storyboard.status }}</p>
+    </div>
+    <a href="{{ return_url }}" class="inline-flex items-center justify-center rounded-lg border border-[#3A3A42] px-3 py-2 text-sm text-white transition hover:border-white/20">
+      返回素材库
+    </a>
+  </section>
+
+  {% if error_message %}
+  <div class="mb-4 rounded-lg border border-[#5A2525] bg-[#2A1515] px-4 py-3 text-sm text-[#f2b4b4]">
+    {{ error_message }}
+  </div>
+  {% endif %}
+
+  <section class="mb-4 rounded-lg border border-[#2A2A30] bg-[#151518] p-4">
+    <div class="grid gap-4 lg:grid-cols-[minmax(0,1fr)_280px]">
+      <div>
+        <p class="text-[10px] uppercase tracking-[0.18em] text-[#8A8A92]">整体想法</p>
+        <p class="mt-2 text-base leading-7 text-white">{{ storyboard.brief_text }}</p>
+      </div>
+      <div class="rounded-lg bg-[#0E0E10] p-3">
+        <p class="text-[10px] uppercase tracking-[0.18em] text-[#8A8A92]">素材时长要求</p>
+        <form id="duration-form" action="/storyboards/{{ storyboard.id }}/duration" method="post" class="mt-2">
+          <div class="mb-2 flex items-center justify-between gap-3">
+            <span id="duration-label" class="text-xl font-medium text-[#D7FF3E]">{{ storyboard.target_duration_seconds }} 秒</span>
+            <span id="duration-saving" class="hidden text-[11px] text-[#8A8A92]">重新生成中</span>
+          </div>
+          <input id="duration-range" type="range" name="target_duration_seconds" min="15" max="1200" step="15" value="{{ storyboard.target_duration_seconds }}" class="w-full accent-[#D7FF3E]">
+          <div class="mt-1 flex justify-between text-[10px] text-[#666670]">
+            <span>15s</span>
+            <span>10min</span>
+            <span>20min</span>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <div class="mt-4 border-t border-[#25252B] pt-3">
+      <div class="mb-2 flex items-center justify-between gap-3">
+        <p class="text-[10px] uppercase tracking-[0.18em] text-[#8A8A92]">素材缩略</p>
+        <span class="text-xs text-[#666670]">{{ selected_clips|length }}</span>
+      </div>
+      <div class="flex gap-1.5 overflow-x-auto pb-1">
+        {% for clip in selected_clips %}
+        <a href="/clips/{{ clip.id }}?library_id={{ current_library_id }}&return_url=/storyboards/{{ storyboard.id }}" class="group relative block h-12 w-16 shrink-0 overflow-hidden rounded-md border border-transparent bg-[#0E0E10] transition hover:border-[#D7FF3E]/60" title="{{ clip.filename }} / {{ clip.summary }}">
+          {% if clip.cover_url %}
+          <img src="{{ clip.cover_url }}" alt="{{ clip.filename }}" class="h-full w-full {% if clip.video_orientation == 'portrait' %}object-contain{% else %}object-cover{% endif %}">
+          {% endif %}
+          <span class="absolute left-0.5 top-0.5 rounded bg-black/70 px-1 py-0.5 text-[8px] leading-none text-white">{{ loop.index }}</span>
+        </a>
+        {% endfor %}
+      </div>
+    </div>
+  </section>
+
+  {% if storyboard.status in ["framework_pending", "filling_pending"] %}
+  <div class="mb-4 rounded-lg border border-[#4A3A22] bg-[#2A2114] px-4 py-3 text-sm text-[#E8C982]">
+    <span class="mr-2 inline-block h-3 w-3 rounded-full border-2 border-[#E8C982]/30 border-t-[#E8C982] align-[-2px] animate-spin"></span>
+    {{ "正在生成叙事框架。" if storyboard.status == "framework_pending" else "正在填充脚本和素材排序。" }}
+  </div>
+  {% endif %}
+
+  <details class="mb-4 rounded-lg border border-[#2A2A30] bg-[#151518] p-4">
+    <summary class="cursor-pointer select-none text-sm font-medium text-white">
+      大纲
+      <span class="ml-2 text-xs font-normal text-[#8A8A92]">{{ storyboard.core_message or "等待生成核心表达。" }}</span>
+    </summary>
+    <div class="mt-4 rounded-lg bg-[#0E0E10] p-4">
+      {% if storyboard.framework_text %}
+      <p class="whitespace-pre-line text-sm leading-7 text-[#D8D8DE]">{{ storyboard.framework_text }}</p>
+      {% else %}
+      <p class="text-sm leading-6 text-[#8A8A92]">还没有生成叙事框架。</p>
+      {% endif %}
+    </div>
+    {% if storyboard.emotional_arc_json %}
+    <div class="mt-4 flex flex-wrap gap-2">
+      {% for item in storyboard.emotional_arc_json %}
+      <span class="rounded-full border border-[#D7FF3E]/25 bg-[#D7FF3E]/10 px-2.5 py-1 text-xs text-[#D7FF3E]">{{ item }}</span>
+      {% endfor %}
+    </div>
+    {% endif %}
+    {% if storyboard.status == "framework_done" %}
+    <form action="/storyboards/{{ storyboard.id }}/framework/confirm" method="post" class="mt-4">
+      <button type="submit" class="rounded-lg bg-[#D7FF3E] px-4 py-2.5 text-sm font-medium text-[#0E0E10] transition hover:bg-[#e4ff7a]">
+        确认并生成脚本
+      </button>
+    </form>
+    {% endif %}
+  </details>
+
+  <section class="rounded-lg border border-[#2A2A30] bg-[#151518] p-5">
+    <div class="mb-4 flex items-start justify-between gap-3">
+      <div>
+        <p class="text-[10px] uppercase tracking-[0.18em] text-[#8A8A92]">脚本</p>
+        <p class="mt-2 text-sm text-white">完整脚本；选中文字可指出错误，hover 段落可看素材。</p>
+      </div>
+      <button id="script-edit-toggle" type="button" class="rounded-md border border-[#3A3A42] px-3 py-1.5 text-xs text-white transition hover:border-[#D7FF3E] hover:text-[#D7FF3E]">
+        edit
+      </button>
+    </div>
+
+    <form id="script-edit-form" action="/storyboards/{{ storyboard.id }}/script" method="post" class="mb-4 hidden rounded-lg border border-[#313139] bg-[#0E0E10] p-3">
+      <textarea name="script_text" rows="16" required class="w-full resize-y rounded-md border border-[#313139] bg-[#151518] px-3 py-3 text-sm leading-7 text-white outline-none focus:border-[#D7FF3E]">{{ storyboard.script_text or "" }}</textarea>
+      <div class="mt-3 flex justify-end gap-2">
+        <button type="button" id="script-edit-cancel" class="rounded-md border border-[#3A3A42] px-3 py-2 text-xs text-white transition hover:border-white/20">取消</button>
+        <button type="submit" class="rounded-md bg-[#D7FF3E] px-3 py-2 text-xs font-medium text-[#0E0E10] transition hover:bg-[#e4ff7a]">保存脚本</button>
+      </div>
+    </form>
+
+    <form id="script-selection-form" action="/storyboards/{{ storyboard.id }}/script/selection" method="post" class="mb-4 hidden rounded-lg border border-[#3A3A42] bg-[#0E0E10] p-3">
+      <p class="text-[10px] uppercase tracking-[0.18em] text-[#8A8A92]">局部修改</p>
+      <p id="script-selection-preview" class="mt-2 line-clamp-3 rounded-md bg-[#151518] px-3 py-2 text-xs leading-5 text-[#D8D8DE]"></p>
+      <input type="hidden" id="script-selected-text" name="selected_text">
+      <textarea name="correction_reason" rows="3" required placeholder="告诉 AI 这里为什么不对，例如：这句说我去了锦里，但素材里没有锦里，是人民公园。" class="mt-3 w-full resize-y rounded-md border border-[#313139] bg-[#151518] px-3 py-3 text-sm leading-6 text-white outline-none placeholder:text-[#5A5A62] focus:border-[#D7FF3E]"></textarea>
+      <div class="mt-3 flex justify-end gap-2">
+        <button type="button" id="script-selection-cancel" class="rounded-md border border-[#3A3A42] px-3 py-2 text-xs text-white transition hover:border-white/20">取消</button>
+        <button type="submit" class="rounded-md bg-[#D7FF3E] px-3 py-2 text-xs font-medium text-[#0E0E10] transition hover:bg-[#e4ff7a]">让 AI 修改这段</button>
+      </div>
+    </form>
+
+    <div id="script-display" class="rounded-lg bg-[#0E0E10] px-6 py-5">
+      {% for paragraph in script_paragraphs %}
+      <article class="group relative border-b border-[#24242A] py-5 first:pt-0 last:border-b-0 last:pb-0">
+        <p class="text-[16px] leading-8 text-white">{{ paragraph.text }}</p>
+        {% if paragraph.clip_items %}
+        <div class="pointer-events-none absolute bottom-full left-0 z-30 mb-2 hidden max-w-full rounded-lg border border-[#2A2A30] bg-[#0B0B0D]/95 p-2 shadow-2xl group-hover:block">
+          <div class="flex max-w-[520px] gap-1.5 overflow-hidden">
+            {% for item in paragraph.clip_items %}
+            {% set clip = item.clip %}
+            {% if clip %}
+            <a href="/clips/{{ clip.id }}?library_id={{ current_library_id }}&return_url=/storyboards/{{ storyboard.id }}" class="pointer-events-auto relative block h-12 w-16 shrink-0 overflow-hidden rounded-md border border-white/10 bg-[#24242A] transition hover:border-[#D7FF3E]" title="#{{ item.record.position }} {{ clip.filename }} / {{ clip.summary }}">
+              {% if clip.cover_url %}
+              <img src="{{ clip.cover_url }}" alt="{{ clip.filename }}" class="h-full w-full {% if clip.video_orientation == 'portrait' %}object-contain{% else %}object-cover{% endif %}">
+              {% endif %}
+              <span class="absolute left-1 top-1 rounded bg-black/70 px-1 py-0.5 text-[8px] leading-none text-white">{{ item.record.position }}</span>
+            </a>
+            {% endif %}
+            {% endfor %}
+          </div>
+        </div>
+        {% endif %}
+      </article>
+      {% else %}
+      <div class="px-4 py-16 text-center">
+        <p class="text-sm text-white">还没有生成完整脚本。</p>
+        <p class="mt-2 text-xs leading-5 text-[#8A8A92]">确认大纲后会在这里出现完整脚本。</p>
+      </div>
+      {% endfor %}
+    </div>
+  </section>
+  </div>
+
+<section id="agent-panel" class="flex h-[calc(100vh-40px)] min-h-[620px] flex-col overflow-hidden rounded-xl border border-[#2A2A30] bg-[#151518] shadow-2xl lg:sticky lg:top-5">
+  <div class="border-b border-[#25252B] px-4 py-3">
+    <div class="flex items-center justify-between gap-3">
+      <div>
+        <p class="text-[10px] uppercase tracking-[0.18em] text-[#8A8A92]">Agent 对话</p>
+        <p class="mt-1 text-sm text-white">找灵感、聊结构、讨论表达。</p>
+      </div>
+      <div class="flex items-center gap-2">
+        <span id="agent-status" class="rounded-full border border-[#3A3A42] px-3 py-1 text-xs text-[#8A8A92]">就绪</span>
+      </div>
+    </div>
+  </div>
+
+  <div id="chat-list" class="flex-1 space-y-4 overflow-y-auto px-4 py-4">
+    {% for message in story_messages %}
+    <article class="flex {% if message.role == 'user' %}justify-end{% else %}justify-start{% endif %}">
+      <div class="max-w-[88%] rounded-lg {% if message.role == 'user' %}bg-[#D7FF3E] text-[#0E0E10]{% else %}bg-[#0E0E10] text-white{% endif %} px-4 py-3">
+        <p class="whitespace-pre-line text-sm leading-6">{{ message.content }}</p>
+        {% if message.reasoning_text %}
+        <details class="mt-3 rounded-md border border-[#2A2A30] bg-black/20 p-3">
+          <summary class="cursor-pointer text-xs text-[#8A8A92]">查看导演思考</summary>
+          <p class="mt-2 whitespace-pre-line text-xs leading-5 text-[#B8B8C2]">{{ message.reasoning_text }}</p>
+        </details>
+        {% endif %}
+        {% if message.action_json and message.action_json.type == "revise_script" %}
+        <form action="/storyboards/{{ storyboard.id }}/revise" method="post" class="mt-3">
+          <input type="hidden" name="target_duration_seconds" value="{{ message.action_json.target_duration_seconds }}">
+          <input type="hidden" name="tone_prompt" value="{{ message.action_json.tone_prompt }}">
+          <textarea name="revision_prompt" class="hidden">{{ message.action_json.revision_prompt }}</textarea>
+          <button type="submit" class="rounded-md bg-[#D7FF3E] px-3 py-2 text-xs font-medium text-[#0E0E10] transition hover:bg-[#e4ff7a]">
+            {{ message.action_json.label or "应用到脚本" }}
+          </button>
+        </form>
+        {% endif %}
+      </div>
+    </article>
+    {% else %}
+    <div class="rounded-lg border border-dashed border-[#303038] bg-[#0E0E10] px-4 py-10 text-center">
+      <p class="text-sm text-white">可以先问 Agent：“这批素材适合讲什么故事？”</p>
+      <p class="mt-2 text-xs leading-5 text-[#8A8A92]">对话会被保留；只有点击应用按钮才会修改脚本。</p>
+    </div>
+    {% endfor %}
+  </div>
+
+  <form id="agent-form" class="border-t border-[#25252B] p-4">
+    <textarea id="agent-message" name="message" rows="3" required placeholder="例如：这些素材能不能讲一个更生活化、不那么像流水账的故事？" class="w-full resize-none rounded-lg border border-[#313139] bg-[#0E0E10] px-4 py-3 text-sm leading-6 text-white outline-none placeholder:text-[#5A5A62] focus:border-[#D7FF3E]"></textarea>
+    <div class="mt-3 flex items-center justify-between gap-3">
+      <p class="text-xs text-[#8A8A92]">修改脚本前会先让你确认。</p>
+      <button id="agent-submit" type="submit" class="inline-flex items-center gap-2 rounded-lg bg-[#D7FF3E] px-4 py-2.5 text-sm font-medium text-[#0E0E10] transition hover:bg-[#e4ff7a]">
+        <span id="agent-spinner" class="hidden h-4 w-4 rounded-full border-2 border-[#0E0E10]/30 border-t-[#0E0E10] animate-spin"></span>
+        发送
+      </button>
+    </div>
+  </form>
+</section>
+</main>
+
+<script>
+  (() => {
+    let agentBusy = false;
+    const status = "{{ storyboard.status }}";
+    if (["framework_pending", "filling_pending"].includes(status)) {
+      window.setTimeout(() => {
+        if (!agentBusy) window.location.reload();
+      }, 2500);
+    }
+
+    const form = document.getElementById("agent-form");
+    const input = document.getElementById("agent-message");
+    const list = document.getElementById("chat-list");
+    const submit = document.getElementById("agent-submit");
+    const spinner = document.getElementById("agent-spinner");
+    const statusLabel = document.getElementById("agent-status");
+    if (!form || !input || !list || !submit || !spinner || !statusLabel) return;
+
+    const durationForm = document.getElementById("duration-form");
+    const durationRange = document.getElementById("duration-range");
+    const durationLabel = document.getElementById("duration-label");
+    const durationSaving = document.getElementById("duration-saving");
+    const formatDuration = (seconds) => {
+      const value = Number.parseInt(seconds, 10);
+      if (!Number.isFinite(value) || value < 60) return `${seconds} 秒`;
+      const minutes = Math.floor(value / 60);
+      const remain = value % 60;
+      return remain ? `${minutes} 分 ${remain} 秒` : `${minutes} 分钟`;
+    };
+    if (durationForm && durationRange && durationLabel) {
+      let initialDuration = durationRange.value;
+      durationLabel.textContent = formatDuration(durationRange.value);
+      durationRange.addEventListener("input", () => {
+        durationLabel.textContent = formatDuration(durationRange.value);
+      });
+      durationRange.addEventListener("change", () => {
+        if (durationRange.value === initialDuration) return;
+        initialDuration = durationRange.value;
+        if (durationSaving) durationSaving.classList.remove("hidden");
+        durationForm.submit();
+      });
+    }
+
+    const scriptEditToggle = document.getElementById("script-edit-toggle");
+    const scriptEditCancel = document.getElementById("script-edit-cancel");
+    const scriptEditForm = document.getElementById("script-edit-form");
+    const scriptDisplay = document.getElementById("script-display");
+    if (scriptEditToggle && scriptEditForm && scriptDisplay) {
+      scriptEditToggle.addEventListener("click", () => {
+        scriptEditForm.classList.remove("hidden");
+        scriptDisplay.classList.add("hidden");
+        const textarea = scriptEditForm.querySelector("textarea");
+        if (textarea) textarea.focus();
+      });
+    }
+    if (scriptEditCancel && scriptEditForm && scriptDisplay) {
+      scriptEditCancel.addEventListener("click", () => {
+        scriptEditForm.classList.add("hidden");
+        scriptDisplay.classList.remove("hidden");
+      });
+    }
+
+    const scriptSelectionForm = document.getElementById("script-selection-form");
+    const scriptSelectionCancel = document.getElementById("script-selection-cancel");
+    const scriptSelectionPreview = document.getElementById("script-selection-preview");
+    const scriptSelectedText = document.getElementById("script-selected-text");
+    const isSelectionInside = (selection, container) => {
+      if (!selection || selection.rangeCount === 0 || !container) return false;
+      const range = selection.getRangeAt(0);
+      return container.contains(range.commonAncestorContainer);
+    };
+    if (scriptDisplay && scriptSelectionForm && scriptSelectionPreview && scriptSelectedText) {
+      scriptDisplay.addEventListener("mouseup", () => {
+        window.setTimeout(() => {
+          const selection = window.getSelection();
+          const selected = selection ? selection.toString().trim() : "";
+          if (!selected || selected.length < 2 || !isSelectionInside(selection, scriptDisplay)) return;
+          scriptSelectedText.value = selected;
+          scriptSelectionPreview.textContent = selected;
+          scriptSelectionForm.classList.remove("hidden");
+          const textarea = scriptSelectionForm.querySelector("textarea");
+          if (textarea) textarea.focus();
+        }, 0);
+      });
+    }
+    if (scriptSelectionCancel && scriptSelectionForm) {
+      scriptSelectionCancel.addEventListener("click", () => {
+        scriptSelectionForm.classList.add("hidden");
+        if (scriptSelectedText) scriptSelectedText.value = "";
+        if (scriptSelectionPreview) scriptSelectionPreview.textContent = "";
+        const selection = window.getSelection();
+        if (selection) selection.removeAllRanges();
+      });
+    }
+
+    const scrollBottom = () => {
+      list.scrollTop = list.scrollHeight;
+    };
+
+    const createBubble = (role, text = "") => {
+      const wrap = document.createElement("article");
+      wrap.className = `flex ${role === "user" ? "justify-end" : "justify-start"}`;
+      const bubble = document.createElement("div");
+      bubble.className = `max-w-[88%] rounded-lg px-4 py-3 ${role === "user" ? "bg-[#D7FF3E] text-[#0E0E10]" : "bg-[#0E0E10] text-white"}`;
+      const body = document.createElement("p");
+      body.className = "whitespace-pre-line text-sm leading-6";
+      body.textContent = text;
+      bubble.appendChild(body);
+      wrap.appendChild(bubble);
+      list.appendChild(wrap);
+      scrollBottom();
+      return { wrap, bubble, body };
+    };
+
+    const createReasoning = (bubble) => {
+      const details = document.createElement("details");
+      details.className = "mt-3 rounded-md border border-[#2A2A30] bg-black/20 p-3";
+      const summary = document.createElement("summary");
+      summary.className = "cursor-pointer text-xs text-[#8A8A92]";
+      summary.textContent = "查看导演思考";
+      const body = document.createElement("p");
+      body.className = "mt-2 whitespace-pre-line text-xs leading-5 text-[#B8B8C2]";
+      details.appendChild(summary);
+      details.appendChild(body);
+      bubble.appendChild(details);
+      return body;
+    };
+
+    const appendAction = (bubble, action) => {
+      if (!action || action.type !== "revise_script") return;
+      const form = document.createElement("form");
+      form.action = "/storyboards/{{ storyboard.id }}/revise";
+      form.method = "post";
+      form.className = "mt-3";
+      form.innerHTML = `
+        <input type="hidden" name="target_duration_seconds" value="${action.target_duration_seconds || {{ storyboard.target_duration_seconds }}}">
+        <input type="hidden" name="tone_prompt">
+        <textarea name="revision_prompt" class="hidden"></textarea>
+        <button type="submit" class="rounded-md bg-[#D7FF3E] px-3 py-2 text-xs font-medium text-[#0E0E10] transition hover:bg-[#e4ff7a]"></button>
+      `;
+      form.querySelector('input[name="tone_prompt"]').value = action.tone_prompt || {{ storyboard.tone_prompt|tojson }};
+      form.querySelector('textarea[name="revision_prompt"]').value = action.revision_prompt || "";
+      form.querySelector("button").textContent = action.label || "应用到脚本";
+      bubble.appendChild(form);
+    };
+
+    const parseSseBlock = (block) => {
+      let event = "message";
+      const dataLines = [];
+      block.split("\n").forEach((line) => {
+        if (line.startsWith("event:")) event = line.slice(6).trim();
+        if (line.startsWith("data:")) dataLines.push(line.slice(5).trim());
+      });
+      if (!dataLines.length) return null;
+      try {
+        return { event, data: JSON.parse(dataLines.join("\n")) };
+      } catch (_) {
+        return null;
+      }
+    };
+
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const message = input.value.trim();
+      if (!message) return;
+      createBubble("user", message);
+      input.value = "";
+      const assistant = createBubble("assistant", "");
+      const reasoning = createReasoning(assistant.bubble);
+      agentBusy = true;
+      submit.disabled = true;
+      spinner.classList.remove("hidden");
+      statusLabel.textContent = "生成中";
+
+      try {
+        const formData = new FormData();
+        formData.append("message", message);
+        const response = await fetch("/storyboards/{{ storyboard.id }}/agent/stream", {
+          method: "POST",
+          body: formData,
+        });
+        if (!response.ok || !response.body) throw new Error(`请求失败：${response.status}`);
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const blocks = buffer.split("\n\n");
+          buffer = blocks.pop() || "";
+          blocks.forEach((block) => {
+            const parsed = parseSseBlock(block);
+            if (!parsed) return;
+            if (parsed.event === "reasoning") reasoning.textContent += parsed.data.text || "";
+            if (parsed.event === "content") assistant.body.textContent += parsed.data.text || "";
+            if (parsed.event === "done") appendAction(assistant.bubble, parsed.data.action);
+            if (parsed.event === "error") assistant.body.textContent += `\n\n生成失败：${parsed.data.message || "未知错误"}`;
+            scrollBottom();
+          });
+        }
+      } catch (error) {
+        assistant.body.textContent += `\n\n生成失败：${error.message}`;
+      } finally {
+        agentBusy = false;
+        submit.disabled = false;
+        spinner.classList.add("hidden");
+        statusLabel.textContent = "就绪";
+        if (["framework_pending", "filling_pending"].includes(status)) {
+          window.setTimeout(() => window.location.reload(), 1200);
+        }
+        scrollBottom();
+      }
+    });
+
+    scrollBottom();
+  })();
+</script>
+{% endblock %}

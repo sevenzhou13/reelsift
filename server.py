@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import mimetypes
 import re
 import shutil
@@ -16,12 +17,14 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
+from urllib.parse import quote
 
 import ffmpeg
 from fastapi import FastAPI, File, Form, HTTPException, Query, Request, Response, UploadFile
-from fastapi.responses import FileResponse, RedirectResponse
+from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from PIL import Image
 
 from ai import analyze_video
 from asr import ASREmptyResult, ASRError, is_asr_configured, transcribe_video
@@ -31,6 +34,8 @@ from db import (
     LibraryRecord,
     ProjectNodeRecord,
     RecycleClipRecord,
+    StoryboardItemRecord,
+    StoryboardRecord,
     TranscriptRecord,
     UserRecord,
     append_clip_tags,
@@ -38,12 +43,17 @@ from db import (
     attach_clip_to_node,
     bind_user_phone,
     change_user_password,
+    add_storyboard_message,
+    clip_exists_by_hash,
+    clip_exists_in_library_by_hash,
+    create_storyboard_run,
     create_session,
     create_user,
     count_uncategorized_clips as db_count_uncategorized_clips,
     create_clip_cut_segment,
     create_library,
     create_project_node,
+    create_storyboard,
     delete_session,
     delete_clip_cut_segment,
     delete_clips,
@@ -54,6 +64,7 @@ from db import (
     get_library_by_id,
     get_library_by_name,
     get_project_node,
+    get_storyboard,
     get_user_by_id,
     get_user_by_session_token,
     issue_phone_verification_code,
@@ -62,6 +73,9 @@ from db import (
     list_clip_cut_segments,
     list_project_nodes,
     list_recycled_clips,
+    list_storyboards,
+    list_storyboard_items,
+    list_storyboard_messages,
     list_users,
     load_transcripts,
     query_adjacent_clip_ids,
@@ -86,12 +100,28 @@ from db import (
     update_clip_cut_segment_export_path,
     update_clip_cut_segment_range,
     update_clip_note,
+    update_clip_note_status,
     update_clip_review,
     update_clip_transcript_state as db_update_clip_transcript_state,
     update_clip_summary,
+    update_storyboard_run,
+    update_storyboard_error,
+    update_storyboard_framework,
+    update_storyboard_result,
+    update_storyboard_script,
+    update_storyboard_status,
 )
 from metrics import build_comparison_ranking, build_comparison_scores, select_cover_frame
 from pipeline import VIDEO_EXTENSIONS, build_video_hash, extract_keyframes, get_keyframe_paths
+from story_ai import (
+    DEFAULT_TONE_PROMPT,
+    StoryClipContext,
+    format_storyboard_framework,
+    generate_storyboard_framework,
+    generate_storyboard_plan,
+    rewrite_script_selection,
+    stream_story_agent_reply,
+)
 
 
 BASE_DIR = Path(__file__).parent
@@ -160,6 +190,7 @@ STAGE_META = {
     "extracting": {"label": "抽帧中", "progress": 42},
     "scoring": {"label": "评分中", "progress": 58},
     "analyzing": {"label": "AI 分析中", "progress": 84},
+    "skipped": {"label": "已跳过", "progress": 100},
     "done": {"label": "已完成", "progress": 100},
     "failed": {"label": "处理失败", "progress": 100},
 }
@@ -178,6 +209,8 @@ class ClipCard:
     has_motion: bool
     sharpness_score: float | None
     cover_url: str | None
+    video_aspect_label: str
+    video_orientation: str
     status: str
     visual_error_message: str | None
     transcript_status: str
@@ -190,6 +223,12 @@ class ClipCard:
     is_favorite: bool = False
     rating: int = 0
     search_score: float = 0.0
+    user_note: str | None = None
+    has_user_note: bool = False
+    note_status: str = "pending"
+    note_status_label: str = "待写 MY NOTE"
+    file_mtime_text: str = "未知"
+    file_mtime_timestamp: float = 0.0
 
 
 @dataclass
@@ -207,6 +246,9 @@ class ClipDetail:
     has_motion: bool
     sharpness_score: float | None
     cover_url: str | None
+    video_aspect_label: str
+    video_orientation: str
+    detail_aspect_class: str
     keyframe_urls: list[str]
     media_url: str | None
     media_type: str | None
@@ -237,6 +279,8 @@ class UploadItemState:
     error_message: str | None = None
     started_at: float | None = None
     finished_at: float | None = None
+    skipped: bool = False
+    source_modified_at: float | None = None
 
 
 @dataclass
@@ -404,6 +448,67 @@ def build_data_url_from_path(file_path: str | None) -> str | None:
         return None
 
 
+def build_video_aspect_info(cover_path: str | None, video_path: str | None = None) -> dict[str, str]:
+    """根据封面或视频流尺寸判断常见横竖屏比例。"""
+    width: int | None = None
+    height: int | None = None
+
+    if cover_path:
+        try:
+            with Image.open(cover_path) as image:
+                width, height = image.size
+        except Exception:
+            width = None
+            height = None
+
+    if (not width or not height) and video_path:
+        try:
+            probe = ffmpeg.probe(str(video_path))
+            video_stream = next(
+                (stream for stream in probe.get("streams", []) if stream.get("codec_type") == "video"),
+                None,
+            )
+            if video_stream:
+                width = int(video_stream.get("width") or 0)
+                height = int(video_stream.get("height") or 0)
+        except Exception:
+            width = None
+            height = None
+
+    if not width or not height:
+        return {
+            "label": "比例未知",
+            "orientation": "unknown",
+            "detail_class": "aspect-[16/9] w-full",
+        }
+
+    ratio = width / height
+    if 1.55 <= ratio <= 1.9:
+        label = "16:9"
+    elif 0.5 <= ratio <= 0.7:
+        label = "9:16"
+    elif 0.9 <= ratio <= 1.12:
+        label = "1:1"
+    else:
+        label = f"{width}:{height}"
+
+    if ratio > 1.12:
+        orientation = "landscape"
+        detail_class = "aspect-[16/9] w-full"
+    elif ratio < 0.9:
+        orientation = "portrait"
+        detail_class = "mx-auto aspect-[9/16] w-full max-w-[420px]"
+    else:
+        orientation = "square"
+        detail_class = "mx-auto aspect-square w-full max-w-[720px]"
+
+    return {
+        "label": label,
+        "orientation": orientation,
+        "detail_class": detail_class,
+    }
+
+
 def format_file_size(size_bytes: int) -> str:
     """把字节数转成更适合页面展示的文本。"""
     size = float(size_bytes)
@@ -415,6 +520,33 @@ def format_file_size(size_bytes: int) -> str:
     if unit_index == 0:
         return f"{int(size)} {units[unit_index]}"
     return f"{size:.1f} {units[unit_index]}"
+
+
+def build_file_mtime_info(file_path: str | None, source_modified_at: float | None = None) -> tuple[str, float]:
+    """读取原文件修改时间，返回展示文本和排序用时间戳。"""
+    if source_modified_at:
+        return datetime.fromtimestamp(float(source_modified_at)).strftime("%Y-%m-%d %H:%M"), float(source_modified_at)
+    if not file_path:
+        return "未知", 0.0
+    try:
+        stat = Path(file_path).stat()
+    except OSError:
+        return "未知", 0.0
+    return datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M"), float(stat.st_mtime)
+
+
+def normalize_note_status(raw_status: str | None, user_note: str | None) -> tuple[str, str]:
+    """把数据库中的备注状态归一化成页面展示用状态。"""
+    if raw_status in {"pending", "done", "skipped"}:
+        status = raw_status
+    else:
+        status = "done" if user_note else "pending"
+    labels = {
+        "pending": "待写 MY NOTE",
+        "done": "已写 MY NOTE",
+        "skipped": "无需记录",
+    }
+    return status, labels[status]
 
 
 def build_keyframe_urls(cover_path: str | None) -> list[str]:
@@ -744,6 +876,13 @@ def build_clip_card_from_row(row: dict[str, Any]) -> ClipCard:
     """把数据库查询结果转换成页面卡片对象。"""
     folder_names = row.get("folder_names") or []
     comparison_scores_json = row.get("comparison_scores_json")
+    aspect_info = build_video_aspect_info(row.get("cover_path"), row.get("filepath"))
+    user_note = str(row["user_note"]).strip() if row.get("user_note") else None
+    note_status, note_status_label = normalize_note_status(row.get("note_status"), user_note)
+    file_mtime_text, file_mtime_timestamp = build_file_mtime_info(
+        row.get("filepath"),
+        row.get("source_modified_at"),
+    )
     return ClipCard(
         id=int(row["id"]),
         filename=row["filename"],
@@ -756,6 +895,8 @@ def build_clip_card_from_row(row: dict[str, Any]) -> ClipCard:
         has_motion=bool(row.get("has_motion")) if row.get("has_motion") is not None else False,
         sharpness_score=row.get("sharpness_score"),
         cover_url=build_cover_url(row.get("cover_path")),
+        video_aspect_label=aspect_info["label"],
+        video_orientation=aspect_info["orientation"],
         status=row.get("status") or "pending",
         visual_error_message=row.get("error_message"),
         transcript_status=row.get("transcript_status") or "pending",
@@ -768,6 +909,12 @@ def build_clip_card_from_row(row: dict[str, Any]) -> ClipCard:
         is_favorite=bool(row.get("is_favorite")),
         rating=int(row.get("rating") or 0),
         search_score=float(row.get("search_score") or 0.0),
+        user_note=user_note,
+        has_user_note=note_status == "done",
+        note_status=note_status,
+        note_status_label=note_status_label,
+        file_mtime_text=file_mtime_text,
+        file_mtime_timestamp=file_mtime_timestamp,
     )
 
 
@@ -795,7 +942,10 @@ def load_clips(
         uncategorized_node_id=current_uncategorized_id,
         db_path=DB_PATH,
     )
-    return [build_clip_card_from_row(row) for row in rows]
+    cards = [build_clip_card_from_row(row) for row in rows]
+    note_rank = {"pending": 0, "skipped": 1, "done": 1}
+    cards.sort(key=lambda clip: (note_rank.get(clip.note_status, 0), -clip.file_mtime_timestamp, -clip.id))
+    return cards
 
 
 def load_clip_card(clip_id: int) -> ClipCard | None:
@@ -842,6 +992,7 @@ def load_clip_detail(clip_id: int) -> ClipDetail | None:
         media_error_message = row.get("preview_error_message")
 
     cover_path = row.get("cover_path")
+    aspect_info = build_video_aspect_info(cover_path, row.get("filepath"))
     transcript_records = load_transcripts(clip_id, DB_PATH)
     transcript_status = normalize_transcript_status(row.get("transcript_status"), transcript_records)
     transcripts = [
@@ -867,6 +1018,9 @@ def load_clip_detail(clip_id: int) -> ClipDetail | None:
         has_motion=bool(row.get("has_motion")) if row.get("has_motion") is not None else False,
         sharpness_score=row.get("sharpness_score"),
         cover_url=build_cover_url(cover_path),
+        video_aspect_label=aspect_info["label"],
+        video_orientation=aspect_info["orientation"],
+        detail_aspect_class=aspect_info["detail_class"],
         keyframe_urls=build_keyframe_urls(cover_path),
         media_url=media_url,
         media_type=media_type,
@@ -908,30 +1062,103 @@ def build_stats(clips: list[ClipCard]) -> dict[str, int]:
     }
 
 
-def save_uploaded_files(files: list[UploadFile]) -> list[Path]:
+def parse_upload_file_metadata(file_metadata_json: str) -> list[float | None]:
+    """解析浏览器提交的原始文件修改时间。"""
+    if not file_metadata_json:
+        return []
+    try:
+        metadata = json.loads(file_metadata_json)
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(metadata, list):
+        return []
+    timestamps: list[float | None] = []
+    for item in metadata:
+        if not isinstance(item, dict):
+            timestamps.append(None)
+            continue
+        last_modified = item.get("last_modified")
+        if isinstance(last_modified, (int, float)) and last_modified > 0:
+            timestamps.append(float(last_modified) / 1000)
+        else:
+            timestamps.append(None)
+    return timestamps
+
+
+def save_uploaded_files(
+    files: list[UploadFile],
+    library_id: int,
+    source_modified_times: list[float | None] | None = None,
+) -> tuple[list[Path], list[UploadItemState], dict[str, float | None]]:
     """把网页上传的视频保存到本地批次目录。"""
-    valid_files = [file for file in files if file.filename]
-    if not valid_files:
+    video_files: list[tuple[UploadFile, float | None]] = []
+    raw_source_times = source_modified_times or []
+    for index, file in enumerate(files):
+        if not file.filename:
+            continue
+        raw_filename = file.filename.replace("\\", "/")
+        path_parts = [part for part in raw_filename.split("/") if part]
+        if any(part.startswith(".") or part == "__MACOSX" for part in path_parts):
+            continue
+        filename = Path(raw_filename).name
+        # 文件夹上传会带上 macOS 的隐藏伴生文件，避免把 ._xxx.MOV 误判成真实视频。
+        if filename.startswith("."):
+            continue
+        if Path(filename).suffix.lower() in VIDEO_EXTENSIONS:
+            source_modified_at = raw_source_times[index] if index < len(raw_source_times) else None
+            video_files.append((file, source_modified_at))
+
+    if not video_files:
         raise HTTPException(status_code=400, detail="请先选择要上传的视频文件。")
-    if len(valid_files) > 50:
-        raise HTTPException(status_code=400, detail="一次最多上传 50 条视频。")
+    if len(video_files) > 200:
+        raise HTTPException(status_code=400, detail="一次最多上传 200 条视频。")
 
     batch_dir = UPLOADS_DIR / datetime.now().strftime("%Y%m%d-%H%M%S")
     batch_dir.mkdir(parents=True, exist_ok=True)
 
     saved_paths: list[Path] = []
-    for file in valid_files:
+    skipped_items: list[UploadItemState] = []
+    source_modified_map: dict[str, float | None] = {}
+    used_filenames: set[str] = set()
+    seen_hashes: set[str] = set()
+    for file, source_modified_at in video_files:
         filename = Path(file.filename).name
         suffix = Path(filename).suffix.lower()
-        if suffix not in VIDEO_EXTENSIONS:
-            raise HTTPException(status_code=400, detail=f"不支持的文件类型：{filename}")
 
-        target = batch_dir / filename
+        stem = Path(filename).stem or "video"
+        candidate_name = filename
+        sequence = 2
+        while candidate_name in used_filenames or (batch_dir / candidate_name).exists():
+            candidate_name = f"{stem}-{sequence}{suffix}"
+            sequence += 1
+        used_filenames.add(candidate_name)
+
+        target = batch_dir / candidate_name
         with target.open("wb") as output:
             shutil.copyfileobj(file.file, output)
-        saved_paths.append(target)
 
-    return saved_paths
+        content_hash = build_file_content_hash(target)
+        if content_hash in seen_hashes or clip_exists_in_library_by_hash(content_hash, library_id, DB_PATH) or clip_exists_by_hash(content_hash, DB_PATH):
+            target.unlink(missing_ok=True)
+            skipped_items.append(
+                UploadItemState(
+                    filename=candidate_name,
+                    filepath=str(target),
+                    stage="skipped",
+                    progress=100,
+                    detail="同一素材库已存在同一视频，已跳过",
+                    finished_at=time.time(),
+                    skipped=True,
+                    source_modified_at=source_modified_at,
+                )
+            )
+            continue
+
+        seen_hashes.add(content_hash)
+        saved_paths.append(target)
+        source_modified_map[str(target)] = source_modified_at
+
+    return saved_paths, skipped_items, source_modified_map
 
 
 def resolve_upload_library(request: Request, library_id_input: int | None, new_library_name: str) -> LibraryRecord:
@@ -979,10 +1206,20 @@ def build_upload_page_context(
     }
 
 
+def build_file_content_hash(file_path: Path) -> str:
+    """计算视频内容 MD5 前 12 位，用于同素材库去重。"""
+    digest = hashlib.md5()
+    with file_path.open("rb") as input_file:
+        for chunk in iter(lambda: input_file.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()[:12]
+
+
 def build_upload_summary(job: UploadJobState) -> dict[str, int]:
     """统计上传任务的完成情况。"""
     total = len(job.items)
     done = sum(1 for item in job.items if item.stage == "done")
+    skipped = sum(1 for item in job.items if item.stage == "skipped")
     failed = sum(1 for item in job.items if item.stage == "failed")
     progress = int(sum(item.progress for item in job.items) / total) if total else 0
     completed_items = [
@@ -994,11 +1231,12 @@ def build_upload_summary(job: UploadJobState) -> dict[str, int]:
         sum((item.finished_at or 0) - (item.started_at or 0) for item in completed_items) / len(completed_items)
         if completed_items else None
     )
-    remaining_items = total - done - failed
+    remaining_items = total - done - skipped - failed
     eta_seconds = int(average_seconds * remaining_items) if average_seconds is not None and remaining_items > 0 else 0
     return {
         "total": total,
         "done": done,
+        "skipped": skipped,
         "failed": failed,
         "progress": progress,
         "elapsed_seconds": elapsed_seconds,
@@ -1031,10 +1269,72 @@ def sanitize_export_filename(name: str) -> str:
     return sanitized or "未命名素材"
 
 
+def normalize_local_return_url(return_url: str | None, fallback: str) -> str:
+    """只允许站内相对返回地址，避免外部跳转。"""
+    if not return_url:
+        return fallback
+    cleaned = return_url.strip()
+    if cleaned.startswith("/") and not cleaned.startswith("//"):
+        return cleaned
+    return fallback
+
+
+def encode_return_url(return_url: str) -> str:
+    """把返回地址编码进详情页翻页链接。"""
+    return quote(return_url, safe="")
+
+
 def get_upload_job(job_id: str) -> UploadJobState | None:
     """读取当前上传任务。"""
     with UPLOAD_LOCK:
         return UPLOAD_JOBS.get(job_id)
+
+
+def get_visible_upload_job(request: Request, library_id: int | None = None) -> UploadJobState | None:
+    """读取当前页面应展示的上传任务，优先展示当前素材库未完成任务。"""
+    visible_library_ids = {library.id for library in get_visible_libraries(request)}
+    with UPLOAD_LOCK:
+        jobs = [
+            job
+            for job in UPLOAD_JOBS.values()
+            if job.library_id in visible_library_ids
+        ]
+    if library_id is not None:
+        library_jobs = [job for job in jobs if job.library_id == library_id]
+        processing_jobs = [job for job in library_jobs if job.status != "completed"]
+        if processing_jobs:
+            return max(processing_jobs, key=lambda job: job.started_at)
+        if library_jobs:
+            return max(library_jobs, key=lambda job: job.started_at)
+
+    processing_jobs = [job for job in jobs if job.status != "completed"]
+    if processing_jobs:
+        return max(processing_jobs, key=lambda job: job.started_at)
+    return None
+
+
+def get_upload_item_source_modified_at(job_id: str, filepath: Path) -> float | None:
+    """从上传任务状态中读取单个文件的原始修改时间。"""
+    with UPLOAD_LOCK:
+        job = UPLOAD_JOBS.get(job_id)
+        if job is None:
+            return None
+        for item in job.items:
+            if item.filepath == str(filepath):
+                return item.source_modified_at
+    return None
+
+
+def build_upload_progress_context(request: Request, current_library_id: int) -> dict[str, Any]:
+    """构造首页上传进度面板上下文。"""
+    active_upload_job = get_visible_upload_job(request, current_library_id)
+    return {
+        **build_common_context(request),
+        "current_library_id": current_library_id,
+        "active_upload_job": active_upload_job,
+        "active_upload_summary": build_upload_summary(active_upload_job) if active_upload_job else None,
+        "format_eta_text": format_eta_text,
+    }
 
 
 def update_upload_item(
@@ -1063,21 +1363,28 @@ def update_upload_item(
                 break
 
         summary = build_upload_summary(job)
-        if summary["done"] + summary["failed"] == summary["total"]:
+        if summary["done"] + summary["skipped"] + summary["failed"] == summary["total"]:
             job.status = "completed"
-            job.message = f"已完成 {summary['done']} 条，失败 {summary['failed']} 条"
+            job.message = f"已完成 {summary['done']} 条，跳过 {summary['skipped']} 条，失败 {summary['failed']} 条"
         elif stage == "failed":
             job.status = "processing"
             job.message = "部分视频处理失败，其他任务继续进行"
         else:
             job.status = "processing"
-            job.message = f"正在处理 {summary['done'] + summary['failed']} / {summary['total']} 条视频"
+            job.message = f"正在处理 {summary['done'] + summary['skipped'] + summary['failed']} / {summary['total']} 条视频"
 
 
-def start_upload_job(saved_paths: list[Path], library: LibraryRecord) -> UploadJobState:
+def start_upload_job(
+    saved_paths: list[Path],
+    library: LibraryRecord,
+    skipped_items: list[UploadItemState] | None = None,
+    source_modified_map: dict[str, float | None] | None = None,
+) -> UploadJobState:
     """创建后台处理任务。"""
     job_id = uuid.uuid4().hex[:12]
     batch_dir = saved_paths[0].parent if saved_paths else UPLOADS_DIR
+    resolved_skipped_items = skipped_items or []
+    resolved_source_modified_map = source_modified_map or {}
     job = UploadJobState(
         job_id=job_id,
         batch_name=batch_dir.name,
@@ -1091,9 +1398,10 @@ def start_upload_job(saved_paths: list[Path], library: LibraryRecord) -> UploadJ
                 stage="saved",
                 progress=STAGE_META["saved"]["progress"],
                 detail="已保存到本地工作目录",
+                source_modified_at=resolved_source_modified_map.get(str(path)),
             )
             for path in saved_paths
-        ],
+        ] + resolved_skipped_items,
         status="processing",
         message=f"文件上传完成，准备写入素材库「{library.name}」",
         redirect_url=f"/?library_id={library.id}",
@@ -1102,12 +1410,16 @@ def start_upload_job(saved_paths: list[Path], library: LibraryRecord) -> UploadJ
     with UPLOAD_LOCK:
         UPLOAD_JOBS[job_id] = job
 
-    thread = threading.Thread(
-        target=process_upload_job,
-        args=(job_id, saved_paths, library.id),
-        daemon=True,
-    )
-    thread.start()
+    if saved_paths:
+        thread = threading.Thread(
+            target=process_upload_job,
+            args=(job_id, saved_paths, library.id),
+            daemon=True,
+        )
+        thread.start()
+    else:
+        job.status = "completed"
+        job.message = f"没有新素材需要处理，已跳过 {len(resolved_skipped_items)} 条重复视频"
     return job
 
 
@@ -1228,9 +1540,11 @@ def process_upload_job(job_id: str, video_paths: list[Path], library_id: int) ->
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     for video in video_paths:
         video_hash = ""
+        source_modified_at = get_upload_item_source_modified_at(job_id, video)
         try:
+            video_hash = build_file_content_hash(video)
             update_upload_item(job_id, video, stage="extracting", detail="正在抽取关键帧")
-            video_hash, frame_dir = extract_keyframes(video, CACHE_DIR)
+            _, frame_dir = extract_keyframes(video, CACHE_DIR)
             frames = get_keyframe_paths(frame_dir)
             if not frames:
                 raise RuntimeError("没有成功抽取关键帧")
@@ -1273,6 +1587,7 @@ def process_upload_job(job_id: str, video_paths: list[Path], library_id: int) ->
                     transcript_error_message=transcript_error_message,
                     preview_status="pending",
                     comparison_status="pending",
+                    source_modified_at=source_modified_at,
                 ),
                 DB_PATH,
             )
@@ -1311,6 +1626,7 @@ def process_upload_job(job_id: str, video_paths: list[Path], library_id: int) ->
                         status="failed",
                         error_message=error_text,
                         transcript_status="pending",
+                        source_modified_at=source_modified_at,
                     ),
                     DB_PATH,
                 )
@@ -1557,6 +1873,268 @@ def parse_selected_ids(raw_selected_ids: list[str]) -> list[int]:
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=f"素材 ID 无效：{raw_value}") from exc
     return selected_ids
+
+
+def require_accessible_storyboard(request: Request, storyboard_id: int) -> StoryboardRecord:
+    """读取故事线，并校验当前用户是否可访问所属素材库。"""
+    storyboard = get_storyboard(storyboard_id, DB_PATH)
+    if storyboard is None:
+        raise HTTPException(status_code=404, detail="故事线不存在。")
+    require_accessible_library(request, storyboard.library_id)
+    return storyboard
+
+
+def build_story_clip_contexts(request: Request, clip_ids: list[int], library_id: int) -> list[StoryClipContext]:
+    """把选中的素材整理成故事线模型输入。"""
+    contexts: list[StoryClipContext] = []
+    for clip_id in clip_ids:
+        clip = require_accessible_clip(request, clip_id)
+        if clip.library_id != library_id or clip.status != "done":
+            continue
+        transcript_text = " ".join(item["text"] for item in clip.transcripts if item.get("text"))
+        if len(transcript_text) > 500:
+            transcript_text = transcript_text[:500] + "..."
+        contexts.append(
+            StoryClipContext(
+                clip_id=clip.id,
+                filename=clip.filename,
+                summary=clip.summary,
+                scene=clip.scene,
+                tags=clip.tags,
+                subjects=clip.subjects,
+                actions=clip.actions,
+                user_note=clip.user_note,
+                transcript_text=transcript_text or None,
+            )
+        )
+    return contexts
+
+
+def build_storyboard_previous_text(storyboard: StoryboardRecord) -> str:
+    """把上一版故事线压成模型可参考的文本。"""
+    parts = [
+        f"标题：{storyboard.title}",
+        f"核心表达：{storyboard.core_message or ''}",
+        f"故事方案：{storyboard.story_plan or ''}",
+        f"第一人称脚本：{storyboard.script_text or ''}",
+    ]
+    return "\n".join(part for part in parts if part.strip())
+
+
+def build_script_paragraphs(storyboard: StoryboardRecord, story_items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """把完整脚本拆段，并按顺序挂上推荐素材。"""
+    script_text = (storyboard.script_text or "").strip()
+    if not script_text:
+        return []
+    paragraphs = [part.strip() for part in re.split(r"\n\s*\n+", script_text) if part.strip()]
+    if len(paragraphs) <= 1:
+        paragraphs = [part.strip() for part in re.split(r"(?<=[。！？!?])\s+", script_text) if part.strip()]
+    if not paragraphs:
+        paragraphs = [script_text]
+    if not story_items:
+        return [{"text": paragraph, "clip_items": []} for paragraph in paragraphs]
+
+    paragraph_count = len(paragraphs)
+    result: list[dict[str, Any]] = [{"text": paragraph, "clip_items": []} for paragraph in paragraphs]
+    for index, item in enumerate(story_items):
+        target_index = min(int(index * paragraph_count / max(len(story_items), 1)), paragraph_count - 1)
+        result[target_index]["clip_items"].append(item)
+    return result
+
+
+def save_storyboard_plan(storyboard: StoryboardRecord, plan, revision_prompt: str | None = None) -> None:
+    """把模型输出写入故事线和排序清单。"""
+    update_storyboard_result(
+        storyboard_id=storyboard.id,
+        title=plan.title,
+        core_message=plan.core_message,
+        emotional_arc=plan.emotional_arc,
+        story_plan=plan.story_plan,
+        script_text=plan.first_person_script,
+        revision_prompt=revision_prompt,
+        items=[
+            StoryboardItemRecord(
+                id=0,
+                storyboard_id=storyboard.id,
+                clip_id=item.clip_id,
+                position=item.position,
+                section_name=item.section,
+                narrative_role=item.role,
+                suggested_duration_seconds=item.suggested_duration_seconds,
+                script_line=item.script_line,
+                reason=item.reason,
+            )
+            for item in plan.clip_order
+        ],
+        db_path=DB_PATH,
+    )
+
+
+def should_offer_script_apply(user_message: str, assistant_text: str) -> bool:
+    """粗略判断这轮对话是否应该给出应用到脚本按钮。"""
+    combined = f"{user_message}\n{assistant_text}".lower()
+    keywords = [
+        "修改",
+        "重写",
+        "改成",
+        "调整",
+        "压到",
+        "控制在",
+        "换成",
+        "重新生成",
+        "应用",
+        "脚本",
+        "时长",
+        "少用",
+        "多用",
+        "减少",
+        "增加",
+    ]
+    return any(keyword in combined for keyword in keywords)
+
+
+def build_script_action(user_message: str, assistant_text: str, storyboard: StoryboardRecord) -> dict[str, Any]:
+    """把 Agent 建议整理成用户确认后可执行的脚本修改动作。"""
+    revision_prompt = "\n".join(
+        part.strip()
+        for part in [
+            "用户在导演 Agent 对话中提出：",
+            user_message,
+            "Agent 给出的修改建议：",
+            assistant_text,
+        ]
+        if part.strip()
+    )
+    return {
+        "type": "revise_script",
+        "label": "应用到脚本",
+        "revision_prompt": revision_prompt,
+        "target_duration_seconds": storyboard.target_duration_seconds,
+        "tone_prompt": storyboard.tone_prompt,
+    }
+
+
+def format_sse_event(event: str, data: dict[str, Any]) -> str:
+    """格式化浏览器可解析的 SSE 事件。"""
+    return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+
+def run_storyboard_framework_job(
+    storyboard_id: int,
+    contexts: list[StoryClipContext],
+    revision_prompt: str | None = None,
+) -> None:
+    """后台生成叙事框架。"""
+    try:
+        storyboard = get_storyboard(storyboard_id, DB_PATH)
+        if storyboard is None:
+            return
+        framework = generate_storyboard_framework(
+            clips=contexts,
+            brief_text=storyboard.brief_text,
+            target_duration_seconds=storyboard.target_duration_seconds,
+            tone_prompt=storyboard.tone_prompt,
+            revision_prompt=revision_prompt,
+        )
+        update_storyboard_framework(
+            storyboard_id=storyboard.id,
+            title=framework.title,
+            core_message=framework.core_message,
+            emotional_arc=framework.emotional_arc,
+            framework_text=format_storyboard_framework(framework),
+            revision_prompt=revision_prompt,
+            db_path=DB_PATH,
+        )
+    except Exception as exc:
+        update_storyboard_error(storyboard_id, str(exc), DB_PATH)
+
+
+def run_storyboard_fill_job(
+    storyboard_id: int,
+    contexts: list[StoryClipContext],
+    revision_prompt: str | None = None,
+) -> None:
+    """后台基于已确认框架填充完整脚本和素材排序。"""
+    try:
+        storyboard = get_storyboard(storyboard_id, DB_PATH)
+        if storyboard is None:
+            return
+        plan = generate_storyboard_plan(
+            clips=contexts,
+            brief_text=storyboard.brief_text,
+            target_duration_seconds=storyboard.target_duration_seconds,
+            tone_prompt=storyboard.tone_prompt,
+            framework_text=storyboard.framework_text,
+            previous_plan_text=build_storyboard_previous_text(storyboard) if storyboard.script_text else None,
+            revision_prompt=revision_prompt,
+        )
+        save_storyboard_plan(storyboard, plan, revision_prompt=revision_prompt)
+    except Exception as exc:
+        update_storyboard_error(storyboard_id, str(exc), DB_PATH)
+
+
+def start_storyboard_framework_job(
+    storyboard_id: int,
+    contexts: list[StoryClipContext],
+    revision_prompt: str | None = None,
+) -> None:
+    """启动叙事框架后台任务。"""
+    thread = threading.Thread(
+        target=run_storyboard_framework_job,
+        args=(storyboard_id, contexts, revision_prompt),
+        daemon=True,
+    )
+    thread.start()
+
+
+def start_storyboard_fill_job(
+    storyboard_id: int,
+    contexts: list[StoryClipContext],
+    revision_prompt: str | None = None,
+) -> None:
+    """启动完整故事线后台任务。"""
+    thread = threading.Thread(
+        target=run_storyboard_fill_job,
+        args=(storyboard_id, contexts, revision_prompt),
+        daemon=True,
+    )
+    thread.start()
+
+
+def build_storyboard_context(request: Request, storyboard_id: int, error_message: str | None = None) -> dict[str, Any]:
+    """构造故事线详情页上下文。"""
+    storyboard = require_accessible_storyboard(request, storyboard_id)
+    library = require_accessible_library(request, storyboard.library_id)
+    selected_clips = [
+        clip
+        for clip_id in storyboard.selected_clip_ids
+        if (clip := load_clip_card(clip_id)) is not None
+    ]
+    item_records = list_storyboard_items(storyboard.id, DB_PATH)
+    messages = list_storyboard_messages(storyboard.id, DB_PATH)
+    clip_map = {clip.id: clip for clip in selected_clips}
+    story_items = [
+        {
+            "record": item,
+            "clip": clip_map.get(item.clip_id),
+        }
+        for item in item_records
+    ]
+    script_paragraphs = build_script_paragraphs(storyboard, story_items)
+    return {
+        **build_common_context(request),
+        "storyboard": storyboard,
+        "story_items": story_items,
+        "script_paragraphs": script_paragraphs,
+        "story_messages": messages,
+        "selected_clips": selected_clips,
+        "current_library": library,
+        "current_library_id": library.id,
+        "duration_options": [15, 30, 45, 60, 90, 120, 180, 300, 600, 1200],
+        "default_tone_prompt": DEFAULT_TONE_PROMPT,
+        "error_message": error_message or storyboard.error_message,
+        "return_url": f"/?library_id={library.id}",
+    }
 
 
 @app.get("/api/pick-folder", include_in_schema=False)
@@ -2084,6 +2662,7 @@ def grid_page(
     )
     libraries = get_visible_libraries(request)
     current_library = require_accessible_library(request, current_library_id)
+    storyboards = list_storyboards(library_ids=[current_library_id], limit=12, db_path=DB_PATH)
     return templates.TemplateResponse(
         request=request,
         name="index.html",
@@ -2097,6 +2676,7 @@ def grid_page(
             "current_favorite": favorite,
             "current_rating": max(0, min(int(rating), 5)),
             "libraries": libraries,
+            "storyboards": storyboards,
             "current_library": current_library,
             "current_library_name": current_library.name if current_library else "素材库",
             "current_library_id": current_library_id,
@@ -2105,6 +2685,7 @@ def grid_page(
             "current_node": get_project_node(current_node_id, DB_PATH) if current_node_id is not None else None,
             "recycle_items": list_recycled_clips(current_library_id, DB_PATH),
             "export_result": None,
+            **build_upload_progress_context(request, current_library_id),
         },
     )
 
@@ -2119,24 +2700,39 @@ def upload_page(request: Request, library_id: Optional[int] = Query(default=None
     )
 
 
+@app.get("/upload/progress", include_in_schema=False)
+def upload_progress_partial(request: Request, library_id: Optional[int] = Query(default=None)):
+    """返回首页上传进度面板局部 HTML。"""
+    current_library_id = resolve_library_id(request, library_id)
+    return templates.TemplateResponse(
+        request=request,
+        name="partials/upload_progress.html",
+        context=build_upload_progress_context(request, current_library_id),
+    )
+
+
 def build_clip_detail_context(
     request: Request,
     clip_id: int,
     current_library_id: int,
     edit_error: str | None = None,
     cut_error: str | None = None,
+    return_url: str | None = None,
 ) -> dict[str, Any]:
     """构造详情页模板上下文。"""
     clip = require_accessible_clip(request, clip_id)
     if clip is None:
         raise HTTPException(status_code=404, detail="素材不存在。")
     previous_clip_id, next_clip_id = load_adjacent_clip_ids(clip_id, current_library_id)
+    fallback_return_url = f"/?library_id={current_library_id}"
+    resolved_return_url = normalize_local_return_url(return_url, fallback_return_url)
     return {
         **build_common_context(request),
         "clip": clip,
         "similar_clips": load_similar_clips(clip.id, current_library_id, clip.scene),
         "cut_segments": load_cut_segments(clip.id),
-        "return_url": f"/?library_id={current_library_id}",
+        "return_url": resolved_return_url,
+        "encoded_return_url": encode_return_url(resolved_return_url),
         "current_library_id": current_library_id,
         "edit_error": edit_error,
         "cut_error": cut_error,
@@ -2167,14 +2763,19 @@ def build_clip_cut_context(
 
 
 @app.get("/clips/{clip_id}", include_in_schema=False)
-def clip_detail_page(request: Request, clip_id: int, library_id: Optional[int] = Query(default=None)):
+def clip_detail_page(
+    request: Request,
+    clip_id: int,
+    library_id: Optional[int] = Query(default=None),
+    return_url: Optional[str] = Query(default=None),
+):
     """渲染单条素材详情页。"""
     clip = require_accessible_clip(request, clip_id)
     current_library_id = resolve_library_id(request, library_id or clip.library_id)
     return templates.TemplateResponse(
         request=request,
         name="clip_detail.html",
-        context=build_clip_detail_context(request, clip_id, current_library_id),
+        context=build_clip_detail_context(request, clip_id, current_library_id, return_url=return_url),
     )
 
 
@@ -2251,6 +2852,367 @@ def keep_recommended_clip(
     if delete_targets:
         delete_clips(delete_targets, library_id, DB_PATH)
     return RedirectResponse(url=f"/clips/{keep_clip_id}?library_id={library_id}", status_code=303)
+
+
+@app.post("/storyboards/new", include_in_schema=False)
+def storyboard_new_page(
+    request: Request,
+    selected_ids: list[str] = Form(default_factory=list),
+    library_id: Optional[int] = Form(default=None),
+):
+    """从素材库多选进入故事线创建页。"""
+    current_library_id = resolve_library_id(request, library_id)
+    clip_ids = parse_selected_ids(selected_ids)
+    if not clip_ids:
+        raise HTTPException(status_code=400, detail="请先选择至少一条素材。")
+    selected_clips = [
+        clip
+        for clip_id in clip_ids
+        if (clip := load_clip_card(clip_id)) is not None and require_accessible_clip(request, clip_id).library_id == current_library_id
+    ]
+    if not selected_clips:
+        raise HTTPException(status_code=400, detail="没有可用于生成故事线的素材。")
+    current_library = require_accessible_library(request, current_library_id)
+    return templates.TemplateResponse(
+        request=request,
+        name="storyboard_new.html",
+        context={
+            **build_common_context(request),
+            "selected_clips": selected_clips,
+            "selected_ids": [clip.id for clip in selected_clips],
+            "current_library": current_library,
+            "current_library_id": current_library_id,
+            "duration_options": [15, 30, 45, 60, 90, 120, 180, 300, 600, 1200],
+            "default_duration": 60,
+            "default_tone_prompt": DEFAULT_TONE_PROMPT,
+            "return_url": f"/?library_id={current_library_id}",
+            "error_message": "",
+        },
+    )
+
+
+@app.post("/storyboards", include_in_schema=False)
+def create_storyboard_action(
+    request: Request,
+    library_id: int = Form(...),
+    selected_ids: list[str] = Form(default_factory=list),
+    brief_text: str = Form(...),
+    target_duration_seconds: int = Form(default=60),
+    tone_prompt: str = Form(default=DEFAULT_TONE_PROMPT),
+):
+    """创建故事线，并后台生成待确认的叙事框架。"""
+    require_accessible_library(request, library_id)
+    clip_ids = parse_selected_ids(selected_ids)
+    try:
+        storyboard = create_storyboard(
+            library_id=library_id,
+            title="叙事框架生成中",
+            brief_text=brief_text,
+            target_duration_seconds=target_duration_seconds,
+            tone_prompt=tone_prompt,
+            selected_clip_ids=clip_ids,
+            db_path=DB_PATH,
+        )
+        contexts = build_story_clip_contexts(request, storyboard.selected_clip_ids, storyboard.library_id)
+        start_storyboard_framework_job(storyboard.id, contexts)
+    except Exception as exc:
+        if "storyboard" in locals():
+            update_storyboard_error(storyboard.id, str(exc), DB_PATH)
+            return RedirectResponse(url=f"/storyboards/{storyboard.id}", status_code=303)
+        selected_clips = [
+            clip
+            for clip_id in clip_ids
+            if (clip := load_clip_card(clip_id)) is not None
+        ]
+        return templates.TemplateResponse(
+            request=request,
+            name="storyboard_new.html",
+            context={
+                **build_common_context(request),
+                "selected_clips": selected_clips,
+                "selected_ids": clip_ids,
+                "current_library": require_accessible_library(request, library_id),
+                "current_library_id": library_id,
+                "duration_options": [15, 30, 45, 60, 90, 120, 180, 300, 600, 1200],
+                "default_duration": target_duration_seconds,
+                "default_tone_prompt": tone_prompt,
+                "return_url": f"/?library_id={library_id}",
+                "error_message": str(exc),
+            },
+            status_code=400,
+        )
+
+    return RedirectResponse(url=f"/storyboards/{storyboard.id}", status_code=303)
+
+
+@app.post("/storyboards/{storyboard_id}/framework/revise", include_in_schema=False)
+def revise_storyboard_framework_action(
+    request: Request,
+    storyboard_id: int,
+    revision_prompt: str = Form(...),
+):
+    """按用户要求重新生成叙事框架。"""
+    storyboard = require_accessible_storyboard(request, storyboard_id)
+    cleaned_revision = revision_prompt.strip()
+    if not cleaned_revision:
+        return templates.TemplateResponse(
+            request=request,
+            name="storyboard_detail.html",
+            context=build_storyboard_context(request, storyboard_id, "请先填写框架修改要求。"),
+            status_code=400,
+        )
+    contexts = build_story_clip_contexts(request, storyboard.selected_clip_ids, storyboard.library_id)
+    update_storyboard_status(
+        storyboard.id,
+        "framework_pending",
+        revision_prompt=cleaned_revision,
+        db_path=DB_PATH,
+    )
+    start_storyboard_framework_job(storyboard.id, contexts, cleaned_revision)
+    return RedirectResponse(url=f"/storyboards/{storyboard.id}", status_code=303)
+
+
+@app.post("/storyboards/{storyboard_id}/framework/confirm", include_in_schema=False)
+def confirm_storyboard_framework_action(request: Request, storyboard_id: int):
+    """确认叙事框架，并后台填充完整故事线。"""
+    storyboard = require_accessible_storyboard(request, storyboard_id)
+    if not storyboard.framework_text:
+        raise HTTPException(status_code=400, detail="叙事框架还没有生成完成。")
+    contexts = build_story_clip_contexts(request, storyboard.selected_clip_ids, storyboard.library_id)
+    update_storyboard_status(storyboard.id, "filling_pending", db_path=DB_PATH)
+    start_storyboard_fill_job(storyboard.id, contexts)
+    return RedirectResponse(url=f"/storyboards/{storyboard.id}", status_code=303)
+
+
+@app.get("/storyboards/{storyboard_id}", include_in_schema=False)
+def storyboard_detail_page(request: Request, storyboard_id: int):
+    """渲染故事线详情页。"""
+    return templates.TemplateResponse(
+        request=request,
+        name="storyboard_detail.html",
+        context=build_storyboard_context(request, storyboard_id),
+    )
+
+
+@app.post("/storyboards/{storyboard_id}/agent/stream", include_in_schema=False)
+def stream_storyboard_agent_action(
+    request: Request,
+    storyboard_id: int,
+    message: str = Form(...),
+):
+    """流式返回导演 Agent 对话。"""
+    storyboard = require_accessible_storyboard(request, storyboard_id)
+    cleaned_message = message.strip()
+    if not cleaned_message:
+        raise HTTPException(status_code=400, detail="请先输入想和导演 Agent 讨论的内容。")
+    contexts = build_story_clip_contexts(request, storyboard.selected_clip_ids, storyboard.library_id)
+    existing_messages = list_storyboard_messages(storyboard.id, DB_PATH)
+    add_storyboard_message(
+        storyboard_id=storyboard.id,
+        role="user",
+        content=cleaned_message,
+        db_path=DB_PATH,
+    )
+    history = [
+        {"role": message_record.role, "content": message_record.content}
+        for message_record in existing_messages
+        if message_record.role in {"user", "assistant"}
+    ]
+    run_id = create_storyboard_run(storyboard_id=storyboard.id, run_type="agent_chat", db_path=DB_PATH)
+
+    def _event_stream():
+        reasoning_parts: list[str] = []
+        content_parts: list[str] = []
+        try:
+            yield format_sse_event("start", {"run_id": run_id})
+            for chunk in stream_story_agent_reply(
+                clips=contexts,
+                brief_text=storyboard.brief_text,
+                target_duration_seconds=storyboard.target_duration_seconds,
+                tone_prompt=storyboard.tone_prompt,
+                current_framework_text=storyboard.framework_text,
+                current_script_text=storyboard.script_text,
+                history=history,
+                user_message=cleaned_message,
+            ):
+                if chunk.chunk_type == "reasoning":
+                    reasoning_parts.append(chunk.text)
+                    yield format_sse_event("reasoning", {"text": chunk.text})
+                elif chunk.chunk_type == "content":
+                    content_parts.append(chunk.text)
+                    yield format_sse_event("content", {"text": chunk.text})
+            reasoning_text = "".join(reasoning_parts).strip()
+            assistant_text = "".join(content_parts).strip()
+            action = (
+                build_script_action(cleaned_message, assistant_text, storyboard)
+                if should_offer_script_apply(cleaned_message, assistant_text)
+                else None
+            )
+            if assistant_text:
+                add_storyboard_message(
+                    storyboard_id=storyboard.id,
+                    role="assistant",
+                    content=assistant_text,
+                    reasoning_text=reasoning_text or None,
+                    action_json=action,
+                    db_path=DB_PATH,
+                )
+            update_storyboard_run(
+                run_id,
+                status="done",
+                reasoning_text=reasoning_text or None,
+                output_text=assistant_text or None,
+                db_path=DB_PATH,
+            )
+            yield format_sse_event("done", {"action": action})
+        except Exception as exc:
+            error_text = str(exc)
+            update_storyboard_run(run_id, status="failed", error_message=error_text, db_path=DB_PATH)
+            yield format_sse_event("error", {"message": error_text})
+
+    return StreamingResponse(_event_stream(), media_type="text/event-stream")
+
+
+@app.post("/storyboards/{storyboard_id}/revise", include_in_schema=False)
+def revise_storyboard_action(
+    request: Request,
+    storyboard_id: int,
+    revision_prompt: str = Form(...),
+    target_duration_seconds: int = Form(default=60),
+    tone_prompt: str = Form(default=DEFAULT_TONE_PROMPT),
+):
+    """按用户修改要求后台重写完整故事线。"""
+    storyboard = require_accessible_storyboard(request, storyboard_id)
+    cleaned_revision = revision_prompt.strip()
+    if not cleaned_revision:
+        return templates.TemplateResponse(
+            request=request,
+            name="storyboard_detail.html",
+            context=build_storyboard_context(request, storyboard_id, "请先填写修改要求。"),
+            status_code=400,
+        )
+    contexts = build_story_clip_contexts(request, storyboard.selected_clip_ids, storyboard.library_id)
+    update_storyboard_status(
+        storyboard.id,
+        "filling_pending",
+        revision_prompt=cleaned_revision,
+        target_duration_seconds=target_duration_seconds,
+        tone_prompt=tone_prompt,
+        db_path=DB_PATH,
+    )
+    start_storyboard_fill_job(storyboard.id, contexts, cleaned_revision)
+    return RedirectResponse(url=f"/storyboards/{storyboard.id}", status_code=303)
+
+
+@app.post("/storyboards/{storyboard_id}/duration", include_in_schema=False)
+def update_storyboard_duration_action(
+    request: Request,
+    storyboard_id: int,
+    target_duration_seconds: int = Form(...),
+):
+    """调整目标时长后自动重新生成脚本。"""
+    storyboard = require_accessible_storyboard(request, storyboard_id)
+    safe_duration = max(15, min(int(target_duration_seconds), 1200))
+    revision_prompt = f"用户将目标时长调整为 {safe_duration} 秒。请在不改变核心表达的前提下，重新规划脚本长度、素材数量和每条素材建议时长。"
+    contexts = build_story_clip_contexts(request, storyboard.selected_clip_ids, storyboard.library_id)
+    update_storyboard_status(
+        storyboard.id,
+        "filling_pending",
+        revision_prompt=revision_prompt,
+        target_duration_seconds=safe_duration,
+        tone_prompt=storyboard.tone_prompt,
+        db_path=DB_PATH,
+    )
+    start_storyboard_fill_job(storyboard.id, contexts, revision_prompt)
+    return RedirectResponse(url=f"/storyboards/{storyboard.id}", status_code=303)
+
+
+@app.post("/storyboards/{storyboard_id}/script", include_in_schema=False)
+def update_storyboard_script_action(
+    request: Request,
+    storyboard_id: int,
+    script_text: str = Form(...),
+):
+    """保存用户手动编辑后的完整脚本，后续 Agent 会读取这个版本。"""
+    require_accessible_storyboard(request, storyboard_id)
+    if not script_text.strip():
+        return templates.TemplateResponse(
+            request=request,
+            name="storyboard_detail.html",
+            context=build_storyboard_context(request, storyboard_id, "脚本不能为空。"),
+            status_code=400,
+        )
+    update_storyboard_script(storyboard_id=storyboard_id, script_text=script_text, db_path=DB_PATH)
+    return RedirectResponse(url=f"/storyboards/{storyboard_id}", status_code=303)
+
+
+@app.post("/storyboards/{storyboard_id}/script/selection", include_in_schema=False)
+def rewrite_storyboard_script_selection_action(
+    request: Request,
+    storyboard_id: int,
+    selected_text: str = Form(...),
+    correction_reason: str = Form(...),
+):
+    """根据用户说明，只改写完整脚本里被选中的文本。"""
+    storyboard = require_accessible_storyboard(request, storyboard_id)
+    cleaned_selected = selected_text.strip()
+    cleaned_reason = correction_reason.strip()
+    current_script = storyboard.script_text or ""
+    if not cleaned_selected:
+        return templates.TemplateResponse(
+            request=request,
+            name="storyboard_detail.html",
+            context=build_storyboard_context(request, storyboard_id, "请先在脚本中选中要修改的文字。"),
+            status_code=400,
+        )
+    if not cleaned_reason:
+        return templates.TemplateResponse(
+            request=request,
+            name="storyboard_detail.html",
+            context=build_storyboard_context(request, storyboard_id, "请说明这段文字哪里不对。"),
+            status_code=400,
+        )
+    if cleaned_selected not in current_script:
+        return templates.TemplateResponse(
+            request=request,
+            name="storyboard_detail.html",
+            context=build_storyboard_context(request, storyboard_id, "选中的文字和当前脚本不一致，请重新选择。"),
+            status_code=400,
+        )
+    contexts = build_story_clip_contexts(request, storyboard.selected_clip_ids, storyboard.library_id)
+    try:
+        rewritten = rewrite_script_selection(
+            clips=contexts,
+            full_script_text=current_script,
+            selected_text=cleaned_selected,
+            correction_reason=cleaned_reason,
+            tone_prompt=storyboard.tone_prompt,
+        )
+    except Exception as exc:
+        return templates.TemplateResponse(
+            request=request,
+            name="storyboard_detail.html",
+            context=build_storyboard_context(request, storyboard_id, str(exc)),
+            status_code=400,
+        )
+    update_storyboard_script(
+        storyboard_id=storyboard.id,
+        script_text=current_script.replace(cleaned_selected, rewritten, 1),
+        db_path=DB_PATH,
+    )
+    add_storyboard_message(
+        storyboard_id=storyboard.id,
+        role="user",
+        content=f"我指出脚本局部有误：{cleaned_reason}\n原文：{cleaned_selected}",
+        db_path=DB_PATH,
+    )
+    add_storyboard_message(
+        storyboard_id=storyboard.id,
+        role="assistant",
+        content=f"已将该段改为：{rewritten}",
+        db_path=DB_PATH,
+    )
+    return RedirectResponse(url=f"/storyboards/{storyboard.id}", status_code=303)
 
 
 @app.post("/clips/{clip_id}/summary", include_in_schema=False)
@@ -2393,6 +3355,51 @@ def update_clip_review_action(
     clip = load_clip_card(clip_id)
     if clip is None:
         raise HTTPException(status_code=404, detail="素材不存在。")
+    current_library_id = resolve_library_id(request, library_id or clip_detail.library_id)
+    current_filter_rating = max(0, min(int(filter_rating), 5))
+    if filter_favorite and not clip.is_favorite:
+        return Response(content="", media_type="text/html")
+    if current_filter_rating > 0 and clip.rating < current_filter_rating:
+        return Response(content="", media_type="text/html")
+    return templates.TemplateResponse(
+        request=request,
+        name="partials/clip_card.html",
+        context={
+            "clip": clip,
+            "current_library_id": current_library_id,
+            "current_library_name": get_library_by_id(current_library_id, DB_PATH).name if get_library_by_id(current_library_id, DB_PATH) else "素材库",
+            "project_tree": build_project_tree(current_library_id, resolve_node_id(current_library_id)),
+            "current_favorite": filter_favorite,
+            "current_rating": current_filter_rating,
+            "card_error": None,
+            "card_edit_open": False,
+        },
+    )
+
+
+@app.post("/clips/{clip_id}/note-status", include_in_schema=False)
+def update_clip_note_status_action(
+    request: Request,
+    clip_id: int,
+    note_status: str = Form(...),
+    filter_favorite: bool = Form(default=False),
+    filter_rating: int = Form(default=0),
+    library_id: Optional[int] = Form(default=None),
+):
+    """更新素材的 MY NOTE 处理状态，并返回卡片局部 HTML。"""
+    clip_detail = require_accessible_clip(request, clip_id)
+    if clip_detail is None:
+        raise HTTPException(status_code=404, detail="素材不存在。")
+
+    try:
+        update_clip_note_status(clip_id=clip_detail.id, note_status=note_status, db_path=DB_PATH)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    clip = load_clip_card(clip_id)
+    if clip is None:
+        raise HTTPException(status_code=404, detail="素材不存在。")
+
     current_library_id = resolve_library_id(request, library_id or clip_detail.library_id)
     current_filter_rating = max(0, min(int(filter_rating), 5))
     if filter_favorite and not clip.is_favorite:
@@ -2857,12 +3864,14 @@ def create_upload_job(
     files: list[UploadFile] = File(...),
     library_id: Optional[int] = Form(default=None),
     new_library_name: str = Form(default=""),
+    file_metadata_json: str = Form(default=""),
 ):
     """接收本地上传的视频并启动后台处理。"""
     try:
         library = resolve_upload_library(request, library_id, new_library_name)
-        saved_paths = save_uploaded_files(files)
-        upload_job = start_upload_job(saved_paths, library)
+        source_modified_times = parse_upload_file_metadata(file_metadata_json)
+        saved_paths, skipped_items, source_modified_map = save_uploaded_files(files, library.id, source_modified_times)
+        upload_job = start_upload_job(saved_paths, library, skipped_items, source_modified_map)
         return templates.TemplateResponse(
             request=request,
             name="partials/upload_job.html",

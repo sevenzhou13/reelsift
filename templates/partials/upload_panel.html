@@ -53,15 +53,25 @@
     </div>
     <p class="mt-5 text-xl font-medium text-white">拖入本地视频，或浏览电脑选择</p>
     <p class="mt-2 text-sm text-slate-400">
-      支持 MP4 / MOV / MKV / WEBM，单次最多 50 条视频。
+      支持 MP4 / MOV / MKV / WEBM，单次最多 200 条视频。
     </p>
-    <button
-      id="upload-trigger"
-      type="button"
-      class="mt-6 rounded-2xl border border-lime-300/40 bg-lime-300/90 px-5 py-3 text-sm font-medium text-slate-950 transition hover:bg-lime-200"
-    >
-      选择本地视频
-    </button>
+    <div class="mt-6 flex flex-col items-center justify-center gap-3 sm:flex-row">
+      <button
+        id="upload-trigger"
+        type="button"
+        class="rounded-2xl border border-lime-300/40 bg-lime-300/90 px-5 py-3 text-sm font-medium text-slate-950 transition hover:bg-lime-200"
+      >
+        选择本地视频
+      </button>
+      <button
+        id="upload-folder-trigger"
+        type="button"
+        class="rounded-2xl border border-white/10 bg-white/5 px-5 py-3 text-sm font-medium text-white transition hover:border-white/20 hover:bg-white/10"
+      >
+        选择整个文件夹
+      </button>
+    </div>
+    <p class="mt-3 text-xs text-slate-500">选择文件夹时，会自动用文件夹名称创建或匹配素材库。</p>
   </div>
 
   {% if upload_error %}

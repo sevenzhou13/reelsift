@@ -34,8 +34,19 @@
       accept=".mp4,.mov,.mkv,.webm,video/mp4,video/quicktime,video/x-matroska,video/webm"
       class="hidden"
     >
+    <input
+      id="upload-folder-input"
+      type="file"
+      name="files"
+      multiple
+      webkitdirectory
+      directory
+      accept=".mp4,.mov,.mkv,.webm,video/mp4,video/quicktime,video/x-matroska,video/webm"
+      class="hidden"
+    >
     <input id="upload-library-id" type="hidden" name="library_id" value="{{ selected_library_id }}">
     <input id="upload-new-library-name" type="hidden" name="new_library_name" value="{{ pending_library_name }}">
+    <input id="upload-file-metadata" type="hidden" name="file_metadata_json" value="[]">
   </form>
 
   <section id="upload-flow">
@@ -46,9 +57,12 @@
 <script>
   (() => {
     const uploadInput = document.getElementById("upload-input");
+    const uploadFolderInput = document.getElementById("upload-folder-input");
     const uploadForm = document.getElementById("upload-form");
     const hiddenLibraryId = document.getElementById("upload-library-id");
     const hiddenNewLibraryName = document.getElementById("upload-new-library-name");
+    const hiddenFileMetadata = document.getElementById("upload-file-metadata");
+    const videoExtensions = new Set([".mp4", ".mov", ".mkv", ".webm"]);
 
     function syncLibraryInputs() {
       const librarySelect = document.getElementById("library-select");
@@ -61,17 +75,78 @@
       }
     }
 
+    function getFilePathParts(file) {
+      const rawPath = file.webkitRelativePath || file.name || "";
+      return rawPath.split("/").filter(Boolean);
+    }
+
+    function isHiddenFolderUploadFile(file) {
+      return getFilePathParts(file).some((part) => part.startsWith(".") || part === "__MACOSX");
+    }
+
+    function isSupportedVideoFile(file) {
+      const name = (file.name || "").toLowerCase();
+      return Array.from(videoExtensions).some((extension) => name.endsWith(extension));
+    }
+
+    function filterUploadInput(input) {
+      if (!input || !input.files || input.files.length === 0 || typeof DataTransfer === "undefined") {
+        return input && input.files ? input.files.length : 0;
+      }
+      const dataTransfer = new DataTransfer();
+      Array.from(input.files)
+        .filter((file) => !isHiddenFolderUploadFile(file) && isSupportedVideoFile(file))
+        .forEach((file) => dataTransfer.items.add(file));
+      input.files = dataTransfer.files;
+      return input.files.length;
+    }
+
+    function syncFileMetadata(input) {
+      if (!hiddenFileMetadata) return;
+      const metadata = Array.from(input && input.files ? input.files : []).map((file) => ({
+        name: file.name || "",
+        relative_path: file.webkitRelativePath || file.name || "",
+        last_modified: file.lastModified || null,
+      }));
+      hiddenFileMetadata.value = JSON.stringify(metadata);
+    }
+
+    function getTopFolderName(files) {
+      const firstFile = Array.from(files || []).find((file) => !isHiddenFolderUploadFile(file));
+      const relativePath = firstFile && firstFile.webkitRelativePath ? firstFile.webkitRelativePath : "";
+      const folderName = relativePath.split("/").filter(Boolean)[0] || "";
+      return folderName.trim();
+    }
+
+    function syncFolderLibraryName() {
+      const newLibraryName = document.getElementById("new-library-name");
+      const folderName = getTopFolderName(uploadFolderInput.files);
+      if (!folderName || !newLibraryName || !hiddenNewLibraryName) return;
+      newLibraryName.value = folderName;
+      hiddenNewLibraryName.value = folderName;
+    }
+
     function bindUploadTrigger() {
       const trigger = document.getElementById("upload-trigger");
+      const folderTrigger = document.getElementById("upload-folder-trigger");
       const librarySelect = document.getElementById("library-select");
       const newLibraryName = document.getElementById("new-library-name");
       if (!trigger || trigger.dataset.bound === "true") return;
 
       trigger.dataset.bound = "true";
       trigger.addEventListener("click", () => {
+        if (uploadFolderInput) uploadFolderInput.value = "";
         syncLibraryInputs();
         uploadInput.click();
       });
+      if (folderTrigger && folderTrigger.dataset.bound !== "true") {
+        folderTrigger.dataset.bound = "true";
+        folderTrigger.addEventListener("click", () => {
+          if (uploadInput) uploadInput.value = "";
+          syncLibraryInputs();
+          uploadFolderInput.click();
+        });
+      }
       if (librarySelect && librarySelect.dataset.bound !== "true") {
         librarySelect.dataset.bound = "true";
         librarySelect.addEventListener("change", syncLibraryInputs);
@@ -84,8 +159,20 @@
 
     if (uploadInput) {
       uploadInput.addEventListener("change", () => {
-        if (uploadInput.files && uploadInput.files.length > 0) {
+        if (filterUploadInput(uploadInput) > 0) {
           syncLibraryInputs();
+          syncFileMetadata(uploadInput);
+          htmx.trigger(uploadForm, "submit");
+        }
+      });
+    }
+
+    if (uploadFolderInput) {
+      uploadFolderInput.addEventListener("change", () => {
+        if (filterUploadInput(uploadFolderInput) > 0) {
+          syncFolderLibraryName();
+          syncLibraryInputs();
+          syncFileMetadata(uploadFolderInput);
           htmx.trigger(uploadForm, "submit");
         }
       });

@@ -39,10 +39,10 @@
 
     <div class="grid gap-5 lg:grid-cols-[1.3fr_1fr]">
       <div>
-        <div class="relative mb-3 aspect-[16/9] overflow-hidden rounded-[10px] bg-[#17171A]">
+        <div class="relative mb-3 {{ clip.detail_aspect_class }} overflow-hidden rounded-[10px] bg-[#17171A]">
           {% if previous_clip_id %}
           <a
-            href="/clips/{{ previous_clip_id }}?library_id={{ current_library_id }}"
+            href="/clips/{{ previous_clip_id }}?library_id={{ current_library_id }}&return_url={{ encoded_return_url }}"
             class="absolute left-4 top-1/2 z-20 flex h-12 w-12 -translate-y-1/2 items-center justify-center rounded-full border border-[#D7FF3E]/30 bg-[#0B0B0D]/80 text-2xl font-light text-[#F4FFD2] shadow-[0_0_30px_rgba(0,0,0,0.32)] backdrop-blur transition hover:border-[#D7FF3E] hover:text-[#D7FF3E]"
             aria-label="查看上一条素材"
           >
@@ -51,7 +51,7 @@
           {% endif %}
           {% if next_clip_id %}
           <a
-            href="/clips/{{ next_clip_id }}?library_id={{ current_library_id }}"
+            href="/clips/{{ next_clip_id }}?library_id={{ current_library_id }}&return_url={{ encoded_return_url }}"
             class="absolute right-4 top-1/2 z-20 flex h-12 w-12 -translate-y-1/2 items-center justify-center rounded-full border border-[#D7FF3E]/30 bg-[#0B0B0D]/80 text-2xl font-light text-[#F4FFD2] shadow-[0_0_30px_rgba(0,0,0,0.32)] backdrop-blur transition hover:border-[#D7FF3E] hover:text-[#D7FF3E]"
             aria-label="查看下一条素材"
           >
@@ -59,12 +59,12 @@
           </a>
           {% endif %}
           {% if clip.media_url %}
-          <video id="clip-player" controls playsinline preload="metadata" poster="{{ clip.cover_url }}" class="h-full w-full object-cover">
+          <video id="clip-player" controls playsinline preload="metadata" poster="{{ clip.cover_url }}" class="h-full w-full object-contain">
             <source src="{{ clip.media_url }}" {% if clip.media_type %}type="{{ clip.media_type }}"{% endif %}>
             当前浏览器无法直接播放这个视频。
           </video>
           {% elif clip.cover_url %}
-          <img src="{{ clip.cover_url }}" alt="{{ clip.filename }}" class="h-full w-full object-cover">
+          <img src="{{ clip.cover_url }}" alt="{{ clip.filename }}" class="h-full w-full object-contain">
           <div class="absolute inset-0 flex items-center justify-center">
             <div class="rounded-full border border-white/20 bg-black/55 px-4 py-2 text-xs text-white backdrop-blur">
               {% if clip.preview_status == "processing" or clip.preview_status == "pending" %}
@@ -80,6 +80,9 @@
 
           <div class="absolute left-3 top-3 rounded-md bg-black/60 px-2 py-1 text-[10px] uppercase tracking-[0.08em] text-white">
             {{ clip.scene }}
+          </div>
+          <div class="absolute right-3 top-3 rounded-md bg-black/60 px-2 py-1 text-[10px] uppercase tracking-[0.08em] text-white">
+            {{ clip.video_aspect_label }}
           </div>
         </div>
 
@@ -171,7 +174,7 @@
           {% endif %}
           <div class="grid grid-cols-1 gap-3 sm:grid-cols-3">
             {% for item in similar_clips %}
-            <a href="/clips/{{ item.id }}?library_id={{ current_library_id }}" class="block">
+            <a href="/clips/{{ item.id }}?library_id={{ current_library_id }}&return_url={{ encoded_return_url }}" class="block">
               <div class="aspect-[16/9] overflow-hidden rounded-[6px] bg-[#222228]">
                 {% if item.cover_url %}
                 <img src="{{ item.cover_url }}" alt="{{ item.filename }}" class="h-full w-full object-cover">
