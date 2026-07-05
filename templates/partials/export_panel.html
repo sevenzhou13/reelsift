@@ -1,4 +1,33 @@
-{% if export_result %}
+{% if export_error %}
+<div class="bg-gradient-to-b from-red-400/10 to-transparent px-5 pb-4 pt-5">
+  <div class="flex items-center gap-3">
+    <div class="flex h-8 w-8 items-center justify-center rounded-full bg-red-400 text-white">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none">
+        <path d="M6 6L18 18M18 6L6 18" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"/>
+      </svg>
+    </div>
+    <div>
+      <p class="text-lg font-medium tracking-tight text-white">导出失败</p>
+      <p class="mt-1 text-xs text-slate-400">请检查原视频、预览文件或导出目录是否可用。</p>
+    </div>
+  </div>
+</div>
+
+<div class="px-5 pb-5">
+  <div class="rounded-2xl bg-[#17171A] p-4 text-sm leading-6 text-red-100/90">
+    {{ export_error }}
+  </div>
+  <div class="mt-4 flex items-center justify-end gap-3 border-t border-white/5 pt-4">
+    <button
+      type="button"
+      data-close-export
+      class="rounded-xl border border-white/10 px-4 py-2 text-sm text-white transition hover:border-white/20"
+    >
+      关闭
+    </button>
+  </div>
+</div>
+{% elif export_result %}
 <div class="bg-gradient-to-b from-lime-300/10 to-transparent px-5 pb-4 pt-5">
   <div class="flex items-center gap-3">
     <div class="flex h-8 w-8 items-center justify-center rounded-full bg-lime-300 text-slate-950">

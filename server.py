@@ -212,6 +212,7 @@ class ClipDetail:
     media_type: str | None
     media_error_message: str | None
     preview_status: str
+    preview_path: str | None
     status: str
     visual_error_message: str | None
     file_size_text: str
@@ -871,6 +872,7 @@ def load_clip_detail(clip_id: int) -> ClipDetail | None:
         media_type=media_type,
         media_error_message=media_error_message,
         preview_status=preview_status,
+        preview_path=row.get("preview_path"),
         status=row.get("status") or "pending",
         visual_error_message=row.get("error_message"),
         file_size_text=file_size_text,
@@ -1450,41 +1452,96 @@ def build_cut_segment_export_path(clip: ClipDetail, segment: ClipCutSegmentRecor
     return destination
 
 
-def export_cut_segment(clip: ClipDetail, segment: ClipCutSegmentRecord, export_dir: str = "") -> Path:
+def resolve_cut_segment_source(clip: ClipDetail) -> tuple[Path, str]:
+    """解析粗剪导出源文件，优先原片，必要时回退到可用预览。"""
+    original_path = Path(clip.filepath)
+    if original_path.exists():
+        return original_path, "original"
+
+    upload_matches = [
+        candidate
+        for candidate in UPLOADS_DIR.rglob(clip.filename)
+        if candidate.is_file()
+    ]
+    if upload_matches:
+        upload_matches.sort(key=lambda path: path.stat().st_mtime, reverse=True)
+        return upload_matches[0], "relocated"
+
+    if clip.preview_path:
+        preview_path = Path(clip.preview_path)
+        if preview_path.exists():
+            return preview_path, "preview"
+
+    raise ValueError("原始视频不存在，且没有可用预览文件，无法导出片段")
+
+
+def export_cut_segment(clip: ClipDetail, segment: ClipCutSegmentRecord, export_dir: str = "") -> tuple[Path, str]:
     """用 ffmpeg 导出粗剪片段，不覆盖原视频。"""
-    source = Path(clip.filepath)
-    if not source.exists():
-        raise ValueError("原始视频不存在，无法导出片段")
+    source, source_kind = resolve_cut_segment_source(clip)
 
     duration_seconds = max((segment.end_ms - segment.start_ms) / 1000.0, 0.01)
     destination = build_cut_segment_export_path(clip, segment, export_dir=export_dir)
-    stream = ffmpeg.input(str(source), ss=segment.start_ms / 1000.0)
-    (
-        ffmpeg
-        .output(
-            stream,
-            str(destination),
-            t=duration_seconds,
-            vcodec="libx264",
-            acodec="aac",
-            pix_fmt="yuv420p",
-            movflags="+faststart",
+
+    def _remove_partial_file() -> None:
+        if destination.exists():
+            destination.unlink()
+
+    try:
+        # 先走无重编码切片，速度接近复制文件；如果源视频编码/关键帧不兼容，再走转码兜底。
+        (
+            ffmpeg
+            .input(str(source), ss=segment.start_ms / 1000.0)
+            .output(
+                str(destination),
+                t=duration_seconds,
+                c="copy",
+                movflags="+faststart",
+            )
+            .overwrite_output()
+            .run(capture_stdout=True, capture_stderr=True)
         )
-        .overwrite_output()
-        .run(quiet=True)
-    )
+    except ffmpeg.Error as exc:
+        _remove_partial_file()
+        try:
+            stream = ffmpeg.input(str(source), ss=segment.start_ms / 1000.0)
+            (
+                ffmpeg
+                .output(
+                    stream,
+                    str(destination),
+                    t=duration_seconds,
+                    vcodec="libx264",
+                    acodec="aac",
+                    pix_fmt="yuv420p",
+                    movflags="+faststart",
+                )
+                .overwrite_output()
+                .run(capture_stdout=True, capture_stderr=True)
+            )
+        except ffmpeg.Error as fallback_exc:
+            _remove_partial_file()
+            stderr = (fallback_exc.stderr or exc.stderr or b"").decode("utf-8", errors="ignore").strip()
+            detail = stderr.splitlines()[-1] if stderr else "ffmpeg 未返回详细错误"
+            raise ValueError(f"ffmpeg 导出失败：{detail}") from fallback_exc
+
     update_clip_cut_segment_export_path(segment.id, destination, DB_PATH)
-    return destination
+    return destination, source_kind
 
 
-def build_cut_export_result(exported_path: Path) -> dict[str, Any]:
+def build_cut_export_result(exported_path: Path, source_kind: str = "") -> dict[str, Any]:
     """构造粗剪导出完成面板需要的数据。"""
+    message = "已导出 1 个粗剪片段"
+    skipped: list[str] = []
+    if source_kind == "relocated":
+        skipped.append("原始路径失效，已在上传目录中按文件名找到原素材")
+    elif source_kind == "preview":
+        skipped.append("原始视频不存在，本次使用浏览器预览版导出")
     return {
         "copied": 1,
         "files": [exported_path.name],
-        "skipped": [],
+        "skipped": skipped,
         "destination": str(exported_path.parent),
-        "message": "已导出 1 个粗剪片段",
+        "message": message,
     }
 
 
@@ -2521,8 +2578,15 @@ def export_clip_cut_segment_action(
     if segment is None or segment.clip_id != clip.id:
         raise HTTPException(status_code=404, detail="粗剪片段不存在。")
     try:
-        exported_path = export_cut_segment(clip, segment, export_dir=export_dir.strip())
+        exported_path, source_kind = export_cut_segment(clip, segment, export_dir=export_dir.strip())
     except Exception as exc:
+        if request.headers.get("X-Requested-With") == "XMLHttpRequest":
+            return templates.TemplateResponse(
+                request=request,
+                name="partials/export_panel.html",
+                context={"export_error": f"片段导出失败：{exc}"},
+                status_code=400,
+            )
         return templates.TemplateResponse(
             request=request,
             name="clip_cut.html",
@@ -2533,7 +2597,7 @@ def export_clip_cut_segment_action(
         return templates.TemplateResponse(
             request=request,
             name="partials/export_panel.html",
-            context={"export_result": build_cut_export_result(exported_path)},
+            context={"export_result": build_cut_export_result(exported_path, source_kind)},
         )
     return RedirectResponse(url=f"/clips/{clip_id}/cut?library_id={current_library_id}", status_code=303)
 

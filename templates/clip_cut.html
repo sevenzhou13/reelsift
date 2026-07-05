@@ -318,7 +318,7 @@
           <div class="h-8 w-8 animate-spin rounded-full border-2 border-[#D7FF3E] border-t-transparent"></div>
           <div>
             <p class="text-lg font-medium tracking-tight text-white">正在导出片段</p>
-            <p class="mt-1 text-xs text-[#8A8A92]">会生成原视频的剪切版，并放到 data/picks/。</p>
+            <p class="mt-1 text-xs text-[#8A8A92]">正在快速切出片段；留空时会导出到默认 picks 目录。</p>
           </div>
         </div>
       </div>
@@ -862,7 +862,7 @@
       pendingForm = form; pendingAction = action;
       const name = form.dataset.segmentName || "未命名片段";
       if (confirmTitle) confirmTitle.textContent = action === "delete" ? "删除这个片段？" : "导出这个片段？";
-      if (confirmMsg)   confirmMsg.textContent   = action === "delete" ? "只会删除粗剪标记，不会删除原视频，也不会删除已经导出的文件。" : "会从原视频生成一个剪切版文件，目录不存在时自动创建。";
+      if (confirmMsg)   confirmMsg.textContent   = action === "delete" ? "只会删除粗剪标记，不会删除原视频，也不会删除已经导出的文件。" : "会优先从原视频快速切出片段；导出目录留空时使用默认 picks 目录。";
       if (confirmName)  confirmName.textContent  = name;
       if (submitConfirm) {
         submitConfirm.textContent = action === "delete" ? "Delete" : "Export";
@@ -899,7 +899,10 @@
         if (customDir) formData.set("export_dir", customDir);
         const res  = await fetch(form.action, { method: "POST", body: formData, headers: { "X-Requested-With": "XMLHttpRequest" } });
         const html = await res.text();
-        if (!res.ok) throw new Error(html || "导出失败");
+        if (!res.ok) {
+          readyState.innerHTML = html || `<div class="px-5 py-5"><p class="text-lg font-medium tracking-tight text-white">导出失败</p><p class="mt-2 text-sm leading-6 text-[#f2b4b4]">请稍后再试。</p><div class="mt-4 flex justify-end"><button type="button" data-close-export class="rounded-xl border border-white/10 px-4 py-2 text-sm text-white transition hover:border-white/20">关闭</button></div></div>`;
+          return;
+        }
         readyState.innerHTML = html;
       } catch (err) {
         readyState.innerHTML = `<div class="px-5 py-5"><p class="text-lg font-medium tracking-tight text-white">导出失败</p><p class="mt-2 text-sm leading-6 text-[#f2b4b4]">${err.message || "请稍后再试。"}</p><div class="mt-4 flex justify-end"><button type="button" data-close-export class="rounded-xl border border-white/10 px-4 py-2 text-sm text-white transition hover:border-white/20">关闭</button></div></div>`;
