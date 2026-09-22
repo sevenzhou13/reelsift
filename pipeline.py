@@ -26,8 +26,12 @@ def scan_folder(folder: Path) -> list[Path]:
 
 
 def build_video_hash(video_path: Path) -> str:
-    """取视频路径字符串的 MD5 前 12 位作为缓存 key。"""
-    return hashlib.md5(str(video_path).encode()).hexdigest()[:12]
+    """取视频内容 MD5 前 12 位作为缓存 key，移动或重命名后仍可命中缓存。"""
+    digest = hashlib.md5()
+    with video_path.open("rb") as input_file:
+        for chunk in iter(lambda: input_file.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()[:12]
 
 
 def get_keyframe_paths(frame_dir: Path, count: int = 6) -> list[Path]:
@@ -99,13 +103,14 @@ def extract_keyframes(
     video_path: Path,
     cache_dir: Path,
     count: int = 6,
+    cache_key: str | None = None,
 ) -> tuple[str, Path]:
     """
     为单个视频抽取 count 张关键帧，存到 cache_dir/{hash}/。
     已有足够帧数时直接跳过。
     返回 (video_hash, 帧目录)。
     """
-    video_hash = build_video_hash(video_path)
+    video_hash = cache_key or build_video_hash(video_path)
     frame_dir = cache_dir / video_hash
 
     # 已缓存则跳过

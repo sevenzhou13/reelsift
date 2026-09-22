@@ -1,0 +1,304 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Reelwave — 面向原始素材的可视化故事编辑器</title>
+  <meta name="description" content="Reelwave 产品案例：一款本地优先的可视化故事编辑器，把原始素材变成创作者可以直接编辑的故事。">
+  <meta property="og:title" content="Reelwave — 面向原始素材的可视化故事编辑器">
+  <meta property="og:description" content="把原始素材变成你能亲手编辑的故事——一篇 AI 产品经理的案例复盘。">
+  <meta property="og:type" content="website">
+  <meta name="theme-color" content="#f7f7f4">
+  <link rel="icon" type="image/svg+xml" href="./assets/favicon.svg">
+  <link rel="stylesheet" href="./styles.css">
+  <script src="./app.js" defer></script>
+</head>
+<body>
+  <div class="reading-progress" aria-hidden="true"><span data-reading-progress></span></div>
+  <a class="skip-link" href="#main">跳到主要内容</a>
+  <header class="site-header" id="top">
+    <a class="wordmark" href="#top" aria-label="Reelwave 首页"><span class="wordmark-mark" aria-hidden="true">R</span>Reelwave</a>
+    <nav aria-label="主导航">
+      <a href="#demo">演示</a>
+      <a href="#evolution">演进</a>
+      <a href="#product">产品</a>
+      <a href="#learnings">心得</a>
+      <span class="nav-disabled" title="仓库链接尚待完成公开安全审查后再开放">GitHub ↗</span>
+    </nav>
+  </header>
+
+  <main id="main">
+    <section class="hero section" aria-labelledby="hero-title">
+      <div class="hero-copy">
+        <p class="eyebrow">REELWAVE · 可视化故事编辑器</p>
+        <h1 id="hero-title">把原始素材，变成你能亲手编辑的故事。</h1>
+        <p class="hero-dek">Reelwave 是一个面向视频创作者的本地优先可视化故事编辑器。你不需要反复用 Prompt 让 AI 重写故事，而是直接移动真实素材来构建故事——AI 会理解并辅助你的每一次编辑决定。</p>
+        <ul class="hero-signals" aria-label="Reelwave 的产品原则">
+          <li><span aria-hidden="true">01</span><strong>本地优先</strong><small>素材留在原有工作流</small></li>
+          <li><span aria-hidden="true">02</span><strong>直接操作</strong><small>移动素材，而非反复提示</small></li>
+          <li><span aria-hidden="true">03</span><strong>创作者主导</strong><small>AI 提议，不替代决定</small></li>
+        </ul>
+        <div class="cta-row">
+          <button class="button button-primary" type="button" data-open-demo>观看60秒演示</button>
+          <a class="button button-secondary" href="#product">了解产品</a>
+          <span class="text-link is-disabled" title="仓库链接尚待公开安全审查完成">查看 GitHub ↗</span>
+        </div>
+      </div>
+
+      <div class="canvas-shell" id="demo" aria-label="Reelwave 交互演示（固定流程，非真实 AI）">
+        <div class="window-bar">
+          <div class="window-dots" aria-hidden="true"><span></span><span></span><span></span></div>
+          <p><span class="canvas-live-dot" aria-hidden="true"></span>北京 · 一个月</p>
+          <span class="demo-label">STORY CANVAS · 交互模拟</span>
+        </div>
+        <div class="canvas-layout">
+          <aside class="canvas-rail" aria-label="故事大纲">
+            <span>故事</span>
+            <strong>01</strong><p>刚到北京</p>
+            <strong>02</strong><p>找到生活节奏</p>
+            <strong>03</strong><p>把城市过成自己的日常</p>
+          </aside>
+          <div class="beat-stage" data-hero-stage>
+            <article class="beat is-active" data-demo-beat="1">
+              <div class="beat-heading"><span>01</span><h3>刚到北京</h3><small>开场</small></div>
+              <p class="intent">开始学着一个人在陌生城市生活。</p><span class="beat-state">3 条素材 · 已成形</span>
+              <div class="clip-row"><span class="clip clip-a">入住自拍</span><span class="clip clip-b" data-hero-cooking>做饭</span><span class="clip clip-c">街景</span></div>
+            </article>
+            <article class="beat">
+              <div class="beat-heading"><span>02</span><h3>找到生活节奏</h3><small>中段</small></div>
+              <div class="clip-row"><span class="clip clip-d">办公室</span><span class="clip clip-e">晚高峰</span></div><span class="beat-state">2 条素材</span>
+            </article>
+            <article class="beat">
+              <div class="beat-heading"><span>03</span><h3>把城市过成自己的日常</h3><small>收尾</small></div>
+              <div class="clip-row"><span class="clip clip-f">公园</span><span class="clip clip-g">朋友</span></div><span class="beat-state">2 条素材</span>
+            </article>
+          </div>
+          <aside class="inspector" data-hero-inspector>
+            <span class="inspector-kicker">故事变化</span>
+            <h3>一个新的叙事角色</h3>
+            <p>把「做饭」移到开场，它的含义从「下班后享受生活」变成了「学会在陌生城市照顾自己」。</p>
+            <label>建议意图</label>
+            <p class="suggestion">从一个人照顾自己的日常开始适应北京。</p>
+            <label>建议文案</label>
+            <p class="suggestion">刚到北京的时候，我先学会的不是工作，而是一个人把日子过起来。</p>
+            <div class="inspector-actions"><button type="button" data-hero-apply>应用建议</button><button type="button" data-hero-dismiss>暂不采用</button></div><p class="inspector-footnote" data-hero-decision>每一次建议都需要创作者确认。</p>
+          </aside>
+        </div>
+        <div class="demo-controls">
+          <p data-hero-status>移动素材，改变故事。</p>
+          <button type="button" data-hero-next>播放交互演示</button>
+        </div>
+      </div>
+    </section>
+
+    <section class="section problem" id="problem" aria-labelledby="problem-title">
+      <div class="section-intro">
+        <p class="section-number">01 · 问题</p>
+        <h2 id="problem-title">真正难的不是剪，而是不知道这些素材到底能讲什么。</h2>
+        <p>拍完一段 vlog 之后，创作者常常面对几十甚至上百个片段、一堆零散的想法，却没有清晰的叙事线。常见的流程是：看完所有素材 → 找主题 → 写文案 → 再去找素材 → 重写 → 再找一遍。</p>
+        <p class="closing-line">认知瓶颈发生在动手剪辑之前。</p>
+      </div>
+      <div class="question-flow" aria-label="从原始素材到故事问题的推导">
+        <p class="flow-kicker">创作开始前的认知链路</p>
+        <div><strong>原始素材</strong><span>87 个片段</span></div><i>↓</i>
+        <div><q>发生了什么？</q></div><i>↓</i>
+        <div><q>这段视频到底在讲什么？</q></div><i>↓</i>
+        <div><q>该怎么讲这个故事？</q></div><i>↓</i>
+        <div><q>哪些素材能支撑每一部分？</q></div>
+      </div>
+      <p class="section-thesis">Reelwave 专注于素材和故事之间的这段空白。</p>
+    </section>
+
+    <section class="section evolution" id="evolution" aria-labelledby="evolution-title">
+      <div class="section-intro narrow">
+        <p class="section-number">02 · 产品演进</p>
+        <h2 id="evolution-title">我一开始做的并不是对的产品。</h2>
+        <p>在验证产品背后的假设过程中，Reelwave 经历了两次重大转向。</p>
+      </div>
+
+      <div class="evolution-track" aria-label="Reelwave 产品演进">
+        <article class="evolution-step">
+          <header><span>V1</span><h3>AI 素材库</h3></header>
+          <p class="hypothesis">创作者的困境在于，无法高效理解和检索大量素材。</p>
+          <ul class="inline-list"><li>画面理解</li><li>语音识别</li><li>标签</li><li>搜索</li><li>评分</li><li>相似素材</li><li>导出</li></ul>
+          <div class="learning"><span>学到了什么</span><p>上传大体积视频本身就制造了新的摩擦。更重要的是，在真实的 vlog 创作里，「找素材」并不是核心的创作难点。</p></div>
+          <strong class="decision">把产品搬到素材所在的地方。</strong>
+        </article>
+
+        <div class="pivot-line"><span>第一次转向</span></div>
+
+        <article class="evolution-step">
+          <header><span>V2</span><h3>本地故事 Agent</h3></header>
+          <div class="mini-flow"><span>Finder</span><b>→</b><span>分析</span><b>→</b><span>故事</span><b>→</b><span>文案</span></div>
+          <p class="hypothesis">如果 AI 能理解所有素材，就能帮创作者发现故事并写出文案。</p>
+          <figure class="asset-placeholder compact" data-asset="codex-story-test.png">
+            <div><span>真实素材待补充</span><strong>Codex 故事测试</strong><small>portfolio/assets/codex-story-test.png</small></div>
+            <figcaption>公开分享前，请替换为真实的 Codex 测试截图。</figcaption>
+          </figure>
+          <div class="capability-list">
+            <span>理解素材内容</span><span>关联不同素材</span><span>找到故事角度</span><span>识别信息缺口</span><span>主动追问</span><span>写出文案</span><span>推荐匹配素材</span>
+          </div>
+          <blockquote>"北京实习的一个月，我慢慢学会把陌生城市过成自己的日常。"</blockquote>
+        </article>
+
+        <div class="realization">
+          <p>CODEX 测试</p>
+          <h3>这暴露了我自己产品的问题。</h3>
+          <p>如果通用 Agent 已经能复现故事 Agent 的核心智能，那么继续做一个 <strong>聊天式 + 故事 Agent</strong>，就没有足够的长期价值。</p>
+        </div>
+
+        <div class="pivot-line is-strong"><span>改变交互方式</span></div>
+
+        <article class="evolution-step evolution-v3">
+          <header><span>V3</span><h3>可视化故事编辑器</h3></header>
+          <p class="decision-large">不在智能程度上与通用 Agent 竞争，而是改变交互方式。</p>
+          <div class="paradigm-shift"><div><span>之前</span><strong>基于 Prompt 的叙事方式</strong><p>靠提示词让 AI 重写故事。</p></div><b>→</b><div><span>之后</span><strong>直接操作式叙事</strong><p>移动素材，AI 理解编辑意图。</p></div></div>
+          <p class="closing-line">我没有选择叠加更多 AI 功能，而是重新设计了创作者与智能之间的交互方式。</p>
+        </article>
+      </div>
+    </section>
+
+    <section class="section core-product" id="product" aria-labelledby="product-title">
+      <div class="section-intro">
+        <p class="section-number">03 · 核心交互</p>
+        <h2 id="product-title">直接移动素材本身，来构建故事。</h2>
+        <p>Story Beat 把叙事意图、文案和真实素材，连接成一个可编辑的结构。</p>
+      </div>
+      <div class="story-structure" aria-label="由 Story Beat 组成的可编辑故事">
+        <div class="story-structure-head"><span>STORY BEATS</span><small>意图 × 文案 × 真实素材</small></div>
+        <article><span>01</span><div><h3>刚到北京</h3><label>意图</label><p>开始学着一个人在陌生城市生活。</p><label>文案</label><p>刚到北京的时候，我先学会的不是工作……</p><label>素材</label><div class="tags"><i>入住自拍</i><i>做饭</i><i>街景</i></div></div></article>
+        <article><span>02</span><div><h3>找到生活节奏</h3><label>意图</label><p>工作开始塑造日常生活。</p><label>素材</label><div class="tags"><i>办公室</i><i>晚高峰</i><i>下班自拍</i></div></div></article>
+        <article><span>03</span><div><h3>把城市过成自己的日常</h3><label>意图</label><p>空闲时间渐渐融入这座城市的生活。</p><label>素材</label><div class="tags"><i>公园</i><i>咖啡</i><i>朋友</i></div></div></article>
+      </div>
+      <p class="interaction-principle">素材可以在 Beat 之间移动，Beat 也可以在故事里重新排序。</p>
+    </section>
+
+    <section class="section wow" id="direct-manipulation" aria-labelledby="wow-title">
+      <div class="section-intro narrow">
+        <p class="section-number">04 · 拖动 → 故事变化</p>
+        <h2 id="wow-title">一次拖动，不只是排版变化，它承载着叙事意图。</h2>
+      </div>
+      <div class="drag-demo" data-drag-demo>
+        <div class="demo-note"><span class="demo-note-dot" aria-hidden="true"></span>交互模拟 · 固定流程 · 非真实 AI 响应</div>
+        <div class="drag-workspace">
+          <div class="drop-column">
+            <article class="drop-beat target-beat" data-target-beat>
+              <span>01</span><h3>刚到北京</h3><p>学着一个人在陌生城市生活。</p>
+            </article>
+            <button class="cooking-clip" draggable="true" type="button" data-cooking-clip><span>做饭素材</span><strong>一个人做晚饭</strong><small>拖动或点击移动</small></button>
+            <article class="drop-beat source-beat" data-source-beat>
+              <span>03</span><h3>下班后的生活</h3><p>享受下班后的日常。</p>
+            </article>
+          </div>
+          <aside class="story-change-panel" data-story-panel aria-live="polite">
+            <span>故事变化</span><h3>故事的含义可能变了。</h3>
+            <p>把这条做饭素材移到开场，它的角色从「下班后享受生活」变成了「学会在陌生城市照顾自己」。</p>
+            <label>建议意图</label><p class="panel-copy">从一个人照顾自己的日常开始适应北京。</p>
+            <label>建议文案</label><p class="panel-copy">刚到北京的时候，我先学会的不是工作，而是一个人把日子过起来。</p>
+            <div><button type="button" data-apply-change>应用</button><button type="button" data-dismiss-change>忽略</button></div>
+          </aside>
+        </div>
+        <p class="demo-result" data-drag-result>把做饭素材拖到 01 · 刚到北京，或在手机上点击这个素材试试。</p>
+      </div>
+      <p class="core-principle">AI 负责建议。<em>创作者负责决定。</em></p>
+    </section>
+
+    <section class="section human-ai" aria-labelledby="human-ai-title">
+      <div class="section-intro narrow">
+        <p class="section-number">05 · 人机协作</p>
+        <h2 id="human-ai-title">AI 是推理层，而不是产品本身。</h2>
+        <p>Reelwave 的设计核心是「直接操作 + AI 辅助」，而不是以对话为先的创作方式。</p>
+      </div>
+      <div class="ownership-grid">
+        <article><span>创作者掌控</span><ul><li>故事方向</li><li>素材摆放</li><li>Story Beat 结构</li><li>个人意义</li><li>最终编辑决定</li></ul></article>
+        <div class="ownership-divider" aria-hidden="true"><span>×</span></div>
+        <article><span>AI 辅助</span><ul><li>理解素材</li><li>发现叙事模式</li><li>文案起草</li><li>素材匹配溯源</li><li>解读编辑改动</li><li>给出局部修改建议</li></ul></article>
+      </div>
+    </section>
+
+    <section class="section local-first" aria-labelledby="local-title">
+      <div class="section-intro">
+        <p class="section-number">06 · 本地优先工作流</p>
+        <h2 id="local-title">把产品搬到素材身边，而不是把素材搬到产品里。</h2>
+        <p>视频文件体积大、存在本地，并且已经按文件夹组织好了。Reelwave 直接进入这套已有的 Finder 工作流，而不是要求创作者把所有素材迁移到另一个云端素材库。</p>
+      </div>
+      <div class="local-layout">
+        <figure class="asset-placeholder finder-placeholder" data-asset="finder-open-reelwave.png">
+          <div class="finder-chrome"><span></span><span></span><span></span><strong>Vlog · 北京</strong></div>
+          <div class="finder-files"><i>IMG_1024.MOV</i><i>IMG_1025.MOV</i><i>IMG_1026.MOV</i><i>IMG_1027.MOV</i></div>
+          <div class="finder-menu"><small>快捷操作</small><strong>用 Reelwave 打开</strong></div>
+          <figcaption>真实 Finder 截图待补充 · portfolio/assets/finder-open-reelwave.png</figcaption>
+        </figure>
+        <div><div class="vertical-flow"><span>Finder</span><b>↓</b><span>用 Reelwave 打开</span><b>↓</b><span>本地分析</span><b>↓</b><span>Story Canvas</span><b>↓</b><span>预览</span></div><ul class="benefit-list"><li><strong>无需上传</strong><span>大体积文件留在原地不动。</span></li><li><strong>原始素材不被改动</strong><span>编辑工作永远不会替换掉源文件。</span></li><li><strong>项目状态本地保存</strong><span>本地数据库会自动恢复项目进度。</span></li></ul></div>
+      </div>
+    </section>
+
+    <section class="section alpha" aria-labelledby="alpha-title">
+      <div class="section-intro narrow">
+        <p class="section-number">07 · 可运行的 Alpha 版本</p>
+        <h2 id="alpha-title">这是一个真正可运行的本地 Alpha 版本，而不只是原型。</h2>
+      </div>
+      <div class="alpha-columns" aria-label="本地 Alpha 版本能力范围">
+        <article><span>素材层</span><ul><li>视频扫描</li><li>关键帧提取</li><li>画面理解</li><li>可选语音识别</li><li>备注与标签</li></ul></article>
+        <article><span>故事层</span><ul><li>Story Beat</li><li>文案生成</li><li>素材匹配溯源</li><li>AI 故事建议</li><li>应用 / 忽略</li><li>故事预览</li></ul></article>
+        <article><span>原生工作流</span><ul><li>Finder 集成</li><li>原生 macOS 窗口</li><li>SQLite 本地状态</li><li>项目状态持久化恢复</li></ul></article>
+      </div>
+      <div class="build-line"><span>技术栈</span><strong>Swift / AppKit · Python · SQLite · 多模态大模型</strong><mark>本地 Alpha 版本 / 面试演示</mark></div>
+    </section>
+
+    <section class="section role" aria-labelledby="role-title">
+      <div class="section-intro narrow">
+        <p class="section-number">08 · 我的角色</p>
+        <h2 id="role-title">我的角色</h2>
+        <p>从问题发现到可运行的 Alpha 版本，我独立负责了整个产品。</p>
+      </div>
+      <div class="role-grid">
+        <article><span>产品</span><ul><li>问题定义</li><li>工作流研究</li><li>产品定位</li><li>功能优先级</li><li>交互设计</li><li>验收标准</li></ul></article>
+        <article><span>AI</span><ul><li>能力评估</li><li>Prompt / 上下文设计</li><li>Codex 替代性测试</li><li>人机交互设计</li></ul></article>
+        <article><span>实现</span><ul><li>架构决策</li><li>与 AI 编程 Agent 协作实现</li><li>测试</li><li>迭代</li></ul></article>
+      </div>
+      <blockquote class="collaboration-statement">Codex 作为工程协作者参与了代码分析、实现和调试；产品方向和验收决定始终由我主导。</blockquote>
+    </section>
+
+    <section class="section lessons" id="learnings" aria-labelledby="lessons-title">
+      <div class="section-intro narrow">
+        <p class="section-number">09 · 产品心得</p>
+        <h2 id="lessons-title">这个项目改变了我看待 AI 产品的方式</h2>
+      </div>
+      <div class="lesson-list">
+        <article><span>01</span><div><h3>AI 能力本身不是护城河。</h3><p>如果通用 Agent 一句提示词就能复现同样的智能，产品的价值就必须来自别处。</p></div></article>
+        <article><span>02</span><div><h3>工作流有时比模型能力更重要。</h3><p>当我不再试图在智能上超越通用 Agent，转而围绕真实的编辑动作设计产品时，Reelwave 才真正有了意义。</p></div></article>
+        <article><span>03</span><div><h3>AI 应该理解用户的意图，而不是替用户做决定。</h3><p>故事的改动始终由用户掌控；AI 只给出局部修改建议，而不会悄悄重写整部作品。</p></div></article>
+      </div>
+    </section>
+
+    <section class="section next" aria-labelledby="next-title">
+      <div class="section-intro narrow"><p class="section-number">10 · 接下来</p><h2 id="next-title">接下来我会往哪个方向做</h2></div>
+      <div class="next-grid">
+        <article><span>01</span><h3>粗剪预览</h3><p>把 Story Beat 变成一个可播放的粗剪版本。</p></article>
+        <article><span>02</span><h3>剪辑软件导出</h3><p>把编辑决定直接导出到 Final Cut / Premiere，而不只是停留在一份文字方案。</p></article>
+        <article><span>03</span><h3>创作者记忆</h3><p>学习创作者在不同项目中反复出现的编辑偏好，同时不干预创作主导权。</p></article>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <p class="footer-kicker"><span aria-hidden="true">↳</span> 产品案例 · 2026</p>
+    <p>Reelwave 是在探索一个问题：</p>
+    <h2>如果 AI 已经能理解素材，创作者又该如何与它交互？</h2>
+    <div class="footer-links"><button type="button" data-open-demo>观看演示</button><span title="仓库链接尚待完成公开安全审查">查看 GitHub</span><span title="简历链接尚未提供">返回简历</span></div>
+    <div class="footer-meta"><strong>Reelwave</strong><span>面向原始素材的可视化故事编辑器</span><span>本地 Alpha 版本 / 面试演示</span></div>
+  </footer>
+
+  <dialog class="demo-dialog" data-demo-dialog aria-labelledby="demo-dialog-title">
+    <form method="dialog"><button class="dialog-close" aria-label="关闭演示">×</button></form>
+    <p class="section-number">产品演示</p>
+    <h2 id="demo-dialog-title">真实演示视频制作中。</h2>
+    <p>下面容器使用的是最终会公开的真实路径。这里特意展示明确的占位说明，而不是伪造产品画面。</p>
+    <div class="video-placeholders">
+      <div><span>首页演示 · 约40秒</span><strong>Finder → Story Canvas → 拖动 → 应用 → 预览</strong><code>assets/reelwave-demo-40s.mp4</code></div>
+      <div><span>完整案例演示 · 约90秒</span><strong>问题 → 本地优先 → 故事 → 直接操作</strong><code>assets/reelwave-demo-90s.mp4</code></div>
+    </div>
+  </dialog>
+</body>
+</html>

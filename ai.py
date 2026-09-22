@@ -38,6 +38,15 @@ _SYSTEM_PROMPT = """你是一个视频素材分析助手。用户是短视频创
   好例子："机场内行人匆匆行走" "电梯内两人自拍，男子低头" "地铁车厢情侣自拍，背景线路图" "冰面滑行第一视角，人群玩耍"
   坏例子："人物脚部特写" "手部与鞋子局部画面" "画面中有几个人在移动"
   不要用"一段"、"这是"开头，不要用抒情形容词，不要写成完整解说句。
+- rename_title 字段：用于直接生成视频文件名的具体短标题，10-22 个字，不含扩展名、序号或标点。
+  要比 summary 更利于区分相似素材：尽量包含具体场景、人物关系/身份、核心动作、关键物件或镜头方式中的 2-4 项。
+  好例子："女生室内对镜讲护肤"、"咖啡馆两人聊天近景"、"地铁车厢情侣自拍"、"冰场第一视角滑行"。
+  禁止写成"室内人物说话"、"人物在室内活动"、"视频素材"这类泛化标题；画面信息不足时宁可保守描述局部特征，如"室内人物对镜口播"。
+- detail 字段：2-4 句详细描述，60-120 字左右，比 summary 更具体。
+  在 summary 的基础上补充：画面细节（穿着、环境布置、光线氛围）、镜头运动方式、人物动作的先后顺序、口播透露的语境或情绪。
+  目标是让创作者不看视频也能大致还原这段素材讲了什么，而不是重复 summary 的用语。
+  如果口播有实质内容，可以在这里更完整地转述观点或事件经过；口播只有语气词时不要编造内容。
+  不要用"这段视频"、"这是一段"开头，不要写抒情总结句，如实描述即可。
 - scene 字段：具体场景名词。如"咖啡店"、"街道"、"室内"、"地铁"。
   不要用"户外"、"公共场所"这种太宽泛的词。
   scene 必须基于多张关键帧里稳定出现的环境证据判断，不能只根据单张局部近景脑补。
@@ -68,6 +77,8 @@ _USER_PROMPT = "请分析这 6 张关键帧，它们来自同一段视频，按�
 
 class VideoAnalysis(BaseModel):
     summary: str = Field(max_length=40)
+    rename_title: str = Field(default="", max_length=40)
+    detail: str = Field(default="", max_length=200)
     scene: str
     subjects: list[str]
     actions: list[str]
@@ -193,7 +204,9 @@ def _normalize_video_analysis_dict(data: dict) -> dict:
     """对模型输出做最小修复，避免因个别字段缺失而整条失败。"""
     normalized = dict(data)
 
-    normalized["summary"] = str(normalized.get("summary") or "暂无摘要").strip()
+    normalized["summary"] = str(normalized.get("summary") or "暂无摘要").strip()[:40]
+    normalized["rename_title"] = str(normalized.get("rename_title") or normalized["summary"]).strip()[:40]
+    normalized["detail"] = str(normalized.get("detail") or normalized["summary"]).strip()[:200]
     normalized["scene"] = str(normalized.get("scene") or "未识别场景").strip()
 
     for field_name in ("subjects", "actions", "tags"):

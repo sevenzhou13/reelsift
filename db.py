@@ -61,6 +61,7 @@ class LibraryRecord:
     clip_count: int = 0
     pending_note_count: int = 0
     owner_user_id: int | None = None
+    memory_note: str | None = None
 
 
 @dataclass
@@ -161,12 +162,64 @@ class StoryboardRunRecord:
 
 
 @dataclass
+class StoryBeatRecord:
+    """可直接在 Story Canvas 中编辑的叙事段落。"""
+
+    id: int
+    storyboard_id: int
+    title: str
+    position: int
+    intent: str
+    script_text: str | None = None
+    user_note: str | None = None
+    locked: bool = False
+    must_use: bool = False
+    ai_generated: bool = True
+    user_edited: bool = False
+
+
+@dataclass
+class StoryBeatClipRecord:
+    """Story Beat 与真实素材之间的有序关联。"""
+
+    id: int
+    beat_id: int
+    clip_id: int
+    position: int
+    in_ms: int | None = None
+    out_ms: int | None = None
+    locked: bool = False
+    must_use: bool = False
+
+
+@dataclass
+class StorySuggestionRecord:
+    """编辑动作触发、等待用户确认的局部 AI 建议。"""
+
+    id: int
+    storyboard_id: int
+    suggestion_type: str
+    status: str
+    source_beat_id: int | None = None
+    target_beat_id: int | None = None
+    clip_id: int | None = None
+    explanation: str = ""
+    suggested_intent: str | None = None
+    suggested_script: str | None = None
+    suggested_thesis: str | None = None
+    payload_json: dict[str, Any] | None = None
+    error_message: str | None = None
+
+
+@dataclass
 class ClipRecord:
     video_hash: str
     filename: str
     filepath: Path
     library_id: int = 1
     summary: str | None = None
+    rename_title: str | None = None
+    detail_summary: str | None = None
     scene: str | None = None
     subjects: list[str] | None = None
     actions: list[str] | None = None
@@ -266,6 +319,7 @@ libraries = Table(
     Column("id", Integer, primary_key=True, autoincrement=True),
     Column("name", String(255), nullable=False, unique=True),
     Column("owner_user_id", Integer, ForeignKey("users.id", ondelete="SET NULL")),
+    Column("memory_note", Text),
     Column("created_at", DateTime, nullable=False),
 )
 
@@ -278,6 +332,8 @@ clips = Table(
     Column("filename", String(1024), nullable=False),
     Column("filepath", Text, nullable=False),
     Column("summary", Text),
+    Column("rename_title", Text),
+    Column("detail_summary", Text),
     Column("scene", Text),
     Column("subjects_json", JSON, nullable=False, default=list),
     Column("actions_json", JSON, nullable=False, default=list),
@@ -295,6 +351,7 @@ clips = Table(
     Column("comparison_scores_json", Text),
     Column("comparison_error_message", Text),
     Column("user_note", Text),
+    Column("narrative_tags_json", JSON, nullable=False, default=list),
     Column("source_modified_at", Float),
     Column("note_status", String(32), nullable=False, default="pending"),
     Column("is_favorite", Boolean, nullable=False, default=False),
@@ -396,6 +453,63 @@ storyboard_runs = Table(
     Column("status", String(32), nullable=False),
     Column("reasoning_text", Text),
     Column("output_text", Text),
+    Column("error_message", Text),
+    Column("created_at", DateTime, nullable=False),
+    Column("updated_at", DateTime, nullable=False),
+)
+
+# Story Canvas 的稳定状态。保留 storyboard/storyboard_items 以兼容既有 Web 工作台。
+story_beats = Table(
+    "story_beats",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("storyboard_id", Integer, ForeignKey("storyboards.id", ondelete="CASCADE"), nullable=False),
+    Column("title", String(255), nullable=False),
+    Column("position", Integer, nullable=False),
+    Column("intent", Text, nullable=False, default=""),
+    Column("script_text", Text),
+    Column("user_note", Text),
+    Column("locked", Boolean, nullable=False, default=False),
+    Column("must_use", Boolean, nullable=False, default=False),
+    Column("ai_generated", Boolean, nullable=False, default=True),
+    Column("user_edited", Boolean, nullable=False, default=False),
+    Column("created_at", DateTime, nullable=False),
+    Column("updated_at", DateTime, nullable=False),
+    UniqueConstraint("storyboard_id", "position", name="uq_story_beats_storyboard_position"),
+)
+
+story_beat_clips = Table(
+    "story_beat_clips",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("beat_id", Integer, ForeignKey("story_beats.id", ondelete="CASCADE"), nullable=False),
+    Column("clip_id", Integer, ForeignKey("clips.id", ondelete="CASCADE"), nullable=False),
+    Column("position", Integer, nullable=False),
+    Column("in_ms", Integer),
+    Column("out_ms", Integer),
+    Column("locked", Boolean, nullable=False, default=False),
+    Column("must_use", Boolean, nullable=False, default=False),
+    Column("created_at", DateTime, nullable=False),
+    Column("updated_at", DateTime, nullable=False),
+    UniqueConstraint("beat_id", "clip_id", name="uq_story_beat_clips_beat_clip"),
+    UniqueConstraint("beat_id", "position", name="uq_story_beat_clips_beat_position"),
+)
+
+story_suggestions = Table(
+    "story_suggestions",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("storyboard_id", Integer, ForeignKey("storyboards.id", ondelete="CASCADE"), nullable=False),
+    Column("suggestion_type", String(64), nullable=False),
+    Column("status", String(32), nullable=False, default="pending"),
+    Column("source_beat_id", Integer, ForeignKey("story_beats.id", ondelete="SET NULL")),
+    Column("target_beat_id", Integer, ForeignKey("story_beats.id", ondelete="SET NULL")),
+    Column("clip_id", Integer, ForeignKey("clips.id", ondelete="SET NULL")),
+    Column("explanation", Text, nullable=False, default=""),
+    Column("suggested_intent", Text),
+    Column("suggested_script", Text),
+    Column("suggested_thesis", Text),
+    Column("payload_json", JSON),
     Column("error_message", Text),
     Column("created_at", DateTime, nullable=False),
     Column("updated_at", DateTime, nullable=False),
@@ -654,6 +768,7 @@ def _ensure_legacy_columns(conn: Connection) -> None:
         "comparison_scores_json": "ALTER TABLE clips ADD COLUMN comparison_scores_json TEXT",
         "comparison_error_message": "ALTER TABLE clips ADD COLUMN comparison_error_message TEXT",
         "user_note": "ALTER TABLE clips ADD COLUMN user_note TEXT",
+        "narrative_tags_json": "ALTER TABLE clips ADD COLUMN narrative_tags_json JSON NOT NULL DEFAULT '[]'",
         "source_modified_at": "ALTER TABLE clips ADD COLUMN source_modified_at FLOAT",
         "note_status": "ALTER TABLE clips ADD COLUMN note_status TEXT NOT NULL DEFAULT 'pending'",
         "is_favorite": "ALTER TABLE clips ADD COLUMN is_favorite BOOLEAN NOT NULL DEFAULT 0",
@@ -680,6 +795,15 @@ def _ensure_legacy_columns(conn: Connection) -> None:
         library_columns = _column_names(conn, "libraries")
         if "owner_user_id" not in library_columns:
             conn.execute(text("ALTER TABLE libraries ADD COLUMN owner_user_id INTEGER"))
+        if "memory_note" not in library_columns:
+            conn.execute(text("ALTER TABLE libraries ADD COLUMN memory_note TEXT"))
+
+    if _table_exists(conn, "clips"):
+        clip_columns = _column_names(conn, "clips")
+        if "rename_title" not in clip_columns:
+            conn.execute(text("ALTER TABLE clips ADD COLUMN rename_title TEXT"))
+        if "detail_summary" not in clip_columns:
+            conn.execute(text("ALTER TABLE clips ADD COLUMN detail_summary TEXT"))
 
     if _table_exists(conn, "clip_cut_segments"):
         cut_columns = _column_names(conn, "clip_cut_segments")
@@ -928,6 +1052,7 @@ def _row_to_library(row: RowMapping) -> LibraryRecord:
     return LibraryRecord(
         id=int(row["id"]),
         name=str(row["name"]),
+        memory_note=str(row["memory_note"]).strip() if row.get("memory_note") else None,
         clip_count=int(row.get("clip_count", 0) or 0),
         pending_note_count=int(row.get("pending_note_count", 0) or 0),
         owner_user_id=int(row["owner_user_id"]) if row.get("owner_user_id") is not None else None,
@@ -1042,6 +1167,7 @@ def list_libraries(
             libraries.c.id,
             libraries.c.name,
             libraries.c.owner_user_id,
+            libraries.c.memory_note,
             func.coalesce(clip_count_subquery.c.clip_count, 0).label("clip_count"),
             func.coalesce(clip_count_subquery.c.pending_note_count, 0).label("pending_note_count"),
         )
@@ -1304,6 +1430,8 @@ def save_clip(record: ClipRecord, db_path: Path = _DB_PATH) -> int:
                     "filename": record.filename,
                     "filepath": str(record.filepath),
                     "summary": record.summary,
+                    "rename_title": record.rename_title,
+                    "detail_summary": record.detail_summary,
                     "scene": record.scene,
                     "subjects_json": record.subjects or [],
                     "actions_json": record.actions or [],
@@ -1517,6 +1645,80 @@ def update_clip_note(
                 )
                 if result.rowcount == 0:
                     raise ValueError("素材不存在")
+
+    _with_retry(_write)
+
+
+def update_clip_detail(
+    clip_id: int,
+    rename_title: str,
+    detail_summary: str,
+    db_path: Path = _DB_PATH,
+) -> None:
+    """回填 AI 生成的短标题和详细摘要，不改动 summary/scene/tags 等其它字段。"""
+    engine = get_engine(db_path)
+
+    def _write() -> None:
+        with _DB_LOCK:
+            with engine.begin() as conn:
+                result = conn.execute(
+                    update(clips)
+                    .where(clips.c.id == clip_id)
+                    .values(
+                        rename_title=rename_title.strip() or None,
+                        detail_summary=detail_summary.strip() or None,
+                        updated_at=_utcnow(),
+                    )
+                )
+                if result.rowcount == 0:
+                    raise ValueError("素材不存在")
+
+    _with_retry(_write)
+
+
+def update_clip_narrative_tags(
+    clip_id: int,
+    tags: list[str],
+    db_path: Path = _DB_PATH,
+) -> None:
+    """保存导演台使用的叙事标签。"""
+    allowed = {"真实", "开场", "转折", "结尾", "以后再说"}
+    cleaned_tags = [tag for tag in tags if tag in allowed]
+    engine = get_engine(db_path)
+
+    def _write() -> None:
+        with _DB_LOCK:
+            with engine.begin() as conn:
+                result = conn.execute(
+                    update(clips)
+                    .where(clips.c.id == clip_id)
+                    .values(narrative_tags_json=cleaned_tags, updated_at=_utcnow())
+                )
+                if result.rowcount == 0:
+                    raise ValueError("素材不存在")
+
+    _with_retry(_write)
+
+
+def update_library_memory_note(
+    library_id: int,
+    note: str,
+    db_path: Path = _DB_PATH,
+) -> None:
+    """保存素材文件夹级的随手记。"""
+    cleaned_note = note.strip()
+    engine = get_engine(db_path)
+
+    def _write() -> None:
+        with _DB_LOCK:
+            with engine.begin() as conn:
+                result = conn.execute(
+                    update(libraries)
+                    .where(libraries.c.id == library_id)
+                    .values(memory_note=cleaned_note or None)
+                )
+                if result.rowcount == 0:
+                    raise ValueError("素材库不存在")
 
     _with_retry(_write)
 
@@ -1963,7 +2165,7 @@ def update_storyboard_script(
     script_text: str,
     db_path: Path = _DB_PATH,
 ) -> None:
-    """保存用户手动编辑后的完整脚本。"""
+    """保存用户手动编辑后的完整脚本，并清空旧素材排序。"""
     cleaned_script = script_text.strip()
     engine = get_engine(db_path)
 
@@ -1982,6 +2184,51 @@ def update_storyboard_script(
                 )
                 if result.rowcount == 0:
                     raise ValueError("故事线不存在。")
+                conn.execute(delete(storyboard_items).where(storyboard_items.c.storyboard_id == storyboard_id))
+
+    _with_retry(_write)
+
+
+def update_storyboard_items(
+    *,
+    storyboard_id: int,
+    items: list[StoryboardItemRecord],
+    db_path: Path = _DB_PATH,
+) -> None:
+    """保存脚本确认后的素材排序清单。"""
+    engine = get_engine(db_path)
+
+    def _write() -> None:
+        with _DB_LOCK:
+            with engine.begin() as conn:
+                now = _utcnow()
+                storyboard_row = conn.execute(
+                    select(storyboards.c.id).where(storyboards.c.id == storyboard_id)
+                ).first()
+                if storyboard_row is None:
+                    raise ValueError("故事线不存在。")
+
+                conn.execute(delete(storyboard_items).where(storyboard_items.c.storyboard_id == storyboard_id))
+                for item in sorted(items, key=lambda record: record.position):
+                    conn.execute(
+                        insert(storyboard_items).values(
+                            storyboard_id=storyboard_id,
+                            clip_id=item.clip_id,
+                            position=item.position,
+                            section_name=item.section_name,
+                            narrative_role=item.narrative_role,
+                            suggested_duration_seconds=max(1, int(item.suggested_duration_seconds)),
+                            script_line=item.script_line,
+                            reason=item.reason,
+                            created_at=now,
+                            updated_at=now,
+                        )
+                    )
+                conn.execute(
+                    update(storyboards)
+                    .where(storyboards.c.id == storyboard_id)
+                    .values(status="done", error_message=None, updated_at=now)
+                )
 
     _with_retry(_write)
 
@@ -2098,6 +2345,377 @@ def list_storyboard_items(storyboard_id: int, db_path: Path = _DB_PATH) -> list[
         )
         for row in rows
     ]
+
+
+def _row_to_story_beat(row: RowMapping) -> StoryBeatRecord:
+    """将 Beat 查询行转换为稳定的数据对象。"""
+    return StoryBeatRecord(
+        id=int(row["id"]),
+        storyboard_id=int(row["storyboard_id"]),
+        title=str(row["title"]),
+        position=int(row["position"]),
+        intent=str(row.get("intent") or ""),
+        script_text=str(row["script_text"]) if row.get("script_text") else None,
+        user_note=str(row["user_note"]) if row.get("user_note") else None,
+        locked=bool(row.get("locked")),
+        must_use=bool(row.get("must_use")),
+        ai_generated=bool(row.get("ai_generated", True)),
+        user_edited=bool(row.get("user_edited")),
+    )
+
+
+def _row_to_story_beat_clip(row: RowMapping) -> StoryBeatClipRecord:
+    """将 Beat 素材关联行转换为稳定的数据对象。"""
+    return StoryBeatClipRecord(
+        id=int(row["id"]),
+        beat_id=int(row["beat_id"]),
+        clip_id=int(row["clip_id"]),
+        position=int(row["position"]),
+        in_ms=int(row["in_ms"]) if row.get("in_ms") is not None else None,
+        out_ms=int(row["out_ms"]) if row.get("out_ms") is not None else None,
+        locked=bool(row.get("locked")),
+        must_use=bool(row.get("must_use")),
+    )
+
+
+def _row_to_story_suggestion(row: RowMapping) -> StorySuggestionRecord:
+    """将待确认的 AI 建议转换为稳定的数据对象。"""
+    payload = row.get("payload_json")
+    return StorySuggestionRecord(
+        id=int(row["id"]),
+        storyboard_id=int(row["storyboard_id"]),
+        suggestion_type=str(row["suggestion_type"]),
+        status=str(row["status"]),
+        source_beat_id=int(row["source_beat_id"]) if row.get("source_beat_id") is not None else None,
+        target_beat_id=int(row["target_beat_id"]) if row.get("target_beat_id") is not None else None,
+        clip_id=int(row["clip_id"]) if row.get("clip_id") is not None else None,
+        explanation=str(row.get("explanation") or ""),
+        suggested_intent=str(row["suggested_intent"]) if row.get("suggested_intent") else None,
+        suggested_script=str(row["suggested_script"]) if row.get("suggested_script") else None,
+        suggested_thesis=str(row["suggested_thesis"]) if row.get("suggested_thesis") else None,
+        payload_json=dict(payload) if isinstance(payload, dict) else None,
+        error_message=str(row["error_message"]) if row.get("error_message") else None,
+    )
+
+
+def list_story_beats(storyboard_id: int, db_path: Path = _DB_PATH) -> list[StoryBeatRecord]:
+    """按 Canvas 顺序读取一个故事的所有 Beat。"""
+    rows = _fetch_all(
+        select(story_beats).where(story_beats.c.storyboard_id == storyboard_id)
+        .order_by(story_beats.c.position.asc(), story_beats.c.id.asc()),
+        db_path=db_path,
+    )
+    return [_row_to_story_beat(row) for row in rows]
+
+
+def list_story_beat_clips(storyboard_id: int, db_path: Path = _DB_PATH) -> list[StoryBeatClipRecord]:
+    """按 Beat、素材位置读取素材关联。"""
+    rows = _fetch_all(
+        select(story_beat_clips)
+        .select_from(story_beat_clips.join(story_beats, story_beats.c.id == story_beat_clips.c.beat_id))
+        .where(story_beats.c.storyboard_id == storyboard_id)
+        .order_by(story_beats.c.position.asc(), story_beat_clips.c.position.asc(), story_beat_clips.c.id.asc()),
+        db_path=db_path,
+    )
+    return [_row_to_story_beat_clip(row) for row in rows]
+
+
+def _normalize_beat_positions_locked(conn: Connection, storyboard_id: int) -> None:
+    """两阶段改序，避开 SQLite/PostgreSQL 的唯一位置约束冲突。"""
+    rows = conn.execute(
+        select(story_beats.c.id).where(story_beats.c.storyboard_id == storyboard_id)
+        .order_by(story_beats.c.position.asc(), story_beats.c.id.asc())
+    ).mappings().all()
+    for index, row in enumerate(rows, start=1):
+        conn.execute(update(story_beats).where(story_beats.c.id == int(row["id"])).values(position=-index))
+    for index, row in enumerate(rows, start=1):
+        conn.execute(update(story_beats).where(story_beats.c.id == int(row["id"])).values(position=index))
+
+
+def _normalize_beat_clip_positions_locked(conn: Connection, beat_id: int) -> None:
+    """两阶段改序，保证一个 Beat 内的素材位置连续。"""
+    rows = conn.execute(
+        select(story_beat_clips.c.id).where(story_beat_clips.c.beat_id == beat_id)
+        .order_by(story_beat_clips.c.position.asc(), story_beat_clips.c.id.asc())
+    ).mappings().all()
+    for index, row in enumerate(rows, start=1):
+        conn.execute(update(story_beat_clips).where(story_beat_clips.c.id == int(row["id"])).values(position=-index))
+    for index, row in enumerate(rows, start=1):
+        conn.execute(update(story_beat_clips).where(story_beat_clips.c.id == int(row["id"])).values(position=index))
+
+
+def materialize_storyboard_beats(storyboard_id: int, db_path: Path = _DB_PATH) -> list[StoryBeatRecord]:
+    """把历史 storyboard_items 首次物化为 Beat；已有 Canvas 状态绝不覆盖。"""
+    engine = get_engine(db_path)
+
+    def _write() -> None:
+        with _DB_LOCK:
+            with engine.begin() as conn:
+                if conn.execute(select(story_beats.c.id).where(story_beats.c.storyboard_id == storyboard_id).limit(1)).first():
+                    return
+                storyboard = conn.execute(select(storyboards).where(storyboards.c.id == storyboard_id)).mappings().first()
+                if storyboard is None:
+                    raise ValueError("故事线不存在。")
+                items = conn.execute(
+                    select(storyboard_items)
+                    .where(storyboard_items.c.storyboard_id == storyboard_id)
+                    .order_by(storyboard_items.c.position.asc(), storyboard_items.c.id.asc())
+                ).mappings().all()
+                now = _utcnow()
+                grouped: dict[str, list[RowMapping]] = {}
+                for item in items:
+                    title = str(item.get("section_name") or "故事段落").strip() or "故事段落"
+                    grouped.setdefault(title, []).append(item)
+                if not grouped and (storyboard.get("script_text") or storyboard.get("story_plan")):
+                    grouped[str(storyboard.get("title") or "完整故事")] = []
+                for beat_position, (title, section_items) in enumerate(grouped.items(), start=1):
+                    intent = str(section_items[0].get("narrative_role") or "承接当前故事") if section_items else "承接当前故事"
+                    lines = [str(item.get("script_line") or "").strip() for item in section_items]
+                    script_text = "\n".join(line for line in lines if line) or None
+                    result = conn.execute(insert(story_beats).values(
+                        storyboard_id=storyboard_id, title=title, position=beat_position,
+                        intent=intent, script_text=script_text, locked=False, must_use=False,
+                        ai_generated=True, user_edited=False, created_at=now, updated_at=now,
+                    ))
+                    beat_id = int(result.inserted_primary_key[0])
+                    for clip_position, item in enumerate(section_items, start=1):
+                        conn.execute(insert(story_beat_clips).values(
+                            beat_id=beat_id, clip_id=int(item["clip_id"]), position=clip_position,
+                            locked=False, must_use=False, created_at=now, updated_at=now,
+                        ))
+
+    _with_retry(_write)
+    return list_story_beats(storyboard_id, db_path)
+
+
+def move_story_beat_clip(
+    *, storyboard_id: int, clip_id: int, target_beat_id: int | None,
+    position: int | None = None, in_ms: int | None = None, out_ms: int | None = None,
+    db_path: Path = _DB_PATH,
+) -> tuple[int | None, int | None]:
+    """移动真实素材；target_beat_id 为 None 时移回 Unused，不触发任何 AI 改写。"""
+    if in_ms is not None and in_ms < 0:
+        raise ValueError("素材入点不能小于 0。")
+    if out_ms is not None and out_ms < 0:
+        raise ValueError("素材出点不能小于 0。")
+    if in_ms is not None and out_ms is not None and out_ms <= in_ms:
+        raise ValueError("素材出点必须晚于入点。")
+    engine = get_engine(db_path)
+
+    def _write() -> tuple[int | None, int | None]:
+        with _DB_LOCK:
+            with engine.begin() as conn:
+                valid_clip = conn.execute(
+                    select(clips.c.id).where(clips.c.id == clip_id, clips.c.library_id == select(storyboards.c.library_id).where(storyboards.c.id == storyboard_id).scalar_subquery())
+                ).first()
+                if valid_clip is None:
+                    raise ValueError("素材不属于当前故事。")
+                if target_beat_id is not None:
+                    target = conn.execute(select(story_beats.c.id).where(story_beats.c.id == target_beat_id, story_beats.c.storyboard_id == storyboard_id)).first()
+                    if target is None:
+                        raise ValueError("目标 Story Beat 不存在。")
+                source_row = conn.execute(
+                    select(story_beat_clips)
+                    .select_from(story_beat_clips.join(story_beats, story_beats.c.id == story_beat_clips.c.beat_id))
+                    .where(story_beats.c.storyboard_id == storyboard_id, story_beat_clips.c.clip_id == clip_id)
+                    .order_by(story_beat_clips.c.id.asc()).limit(1)
+                ).mappings().first()
+                source_beat_id = int(source_row["beat_id"]) if source_row else None
+                affected_ids = {source_beat_id} if source_beat_id else set()
+                conn.execute(delete(story_beat_clips).where(
+                    story_beat_clips.c.clip_id == clip_id,
+                    story_beat_clips.c.beat_id.in_(select(story_beats.c.id).where(story_beats.c.storyboard_id == storyboard_id)),
+                ))
+                # 删除源素材后先补齐位置，否则同 Beat 拖到末尾会被旧位置空洞截断。
+                if source_beat_id is not None:
+                    _normalize_beat_clip_positions_locked(conn, source_beat_id)
+                if target_beat_id is not None:
+                    existing_count = conn.execute(select(func.count(story_beat_clips.c.id)).where(story_beat_clips.c.beat_id == target_beat_id)).scalar_one()
+                    target_position = max(1, min(int(position or existing_count + 1), int(existing_count) + 1))
+                    # 先留出空位，保证给同一 Beat 内重新排序的情况。
+                    rows = conn.execute(select(story_beat_clips.c.id, story_beat_clips.c.position).where(story_beat_clips.c.beat_id == target_beat_id).order_by(story_beat_clips.c.position.desc())).mappings().all()
+                    for row in rows:
+                        if int(row["position"]) >= target_position:
+                            conn.execute(update(story_beat_clips).where(story_beat_clips.c.id == int(row["id"])).values(position=int(row["position"]) + 1))
+                    conn.execute(insert(story_beat_clips).values(
+                        beat_id=target_beat_id, clip_id=clip_id, position=target_position,
+                        in_ms=in_ms if in_ms is not None else (source_row.get("in_ms") if source_row else None),
+                        out_ms=out_ms if out_ms is not None else (source_row.get("out_ms") if source_row else None),
+                        locked=bool(source_row.get("locked")) if source_row else False,
+                        must_use=bool(source_row.get("must_use")) if source_row else False,
+                        created_at=_utcnow(), updated_at=_utcnow(),
+                    ))
+                    affected_ids.add(target_beat_id)
+                for beat_id in affected_ids:
+                    _normalize_beat_clip_positions_locked(conn, beat_id)
+                conn.execute(update(storyboards).where(storyboards.c.id == storyboard_id).values(updated_at=_utcnow()))
+                return source_beat_id, target_beat_id
+
+    return _with_retry(_write)
+
+
+def reorder_story_beats(*, storyboard_id: int, beat_ids: list[int], db_path: Path = _DB_PATH) -> list[StoryBeatRecord]:
+    """按用户拖动的完整 Beat 顺序保存，拒绝不完整或跨故事列表。"""
+    safe_ids = [int(item) for item in beat_ids]
+    engine = get_engine(db_path)
+
+    def _write() -> None:
+        with _DB_LOCK:
+            with engine.begin() as conn:
+                existing = conn.execute(select(story_beats.c.id).where(story_beats.c.storyboard_id == storyboard_id)).scalars().all()
+                if len(safe_ids) != len(existing) or len(set(safe_ids)) != len(existing) or set(safe_ids) != set(existing):
+                    raise ValueError("Beat 排序列表必须包含当前故事的全部 Beat。")
+                for index, beat_id in enumerate(safe_ids, start=1):
+                    conn.execute(update(story_beats).where(story_beats.c.id == beat_id).values(position=-index))
+                for index, beat_id in enumerate(safe_ids, start=1):
+                    conn.execute(update(story_beats).where(story_beats.c.id == beat_id).values(position=index, updated_at=_utcnow()))
+                conn.execute(update(storyboards).where(storyboards.c.id == storyboard_id).values(updated_at=_utcnow()))
+
+    _with_retry(_write)
+    return list_story_beats(storyboard_id, db_path)
+
+
+def update_story_beat(
+    *, beat_id: int, title: str | None = None, intent: str | None = None, script_text: str | None = None,
+    user_note: str | None = None, locked: bool | None = None, must_use: bool | None = None,
+    db_path: Path = _DB_PATH,
+) -> StoryBeatRecord:
+    """保存用户对 Beat 字段的直接编辑。"""
+    engine = get_engine(db_path)
+
+    def _write() -> None:
+        with _DB_LOCK:
+            with engine.begin() as conn:
+                values: dict[str, Any] = {"updated_at": _utcnow()}
+                for key, value in (("title", title), ("intent", intent), ("script_text", script_text), ("user_note", user_note)):
+                    if value is not None:
+                        values[key] = value.strip()
+                if locked is not None:
+                    values["locked"] = bool(locked)
+                if must_use is not None:
+                    values["must_use"] = bool(must_use)
+                if len(values) > 1:
+                    values["user_edited"] = True
+                result = conn.execute(update(story_beats).where(story_beats.c.id == beat_id).values(**values))
+                if result.rowcount == 0:
+                    raise ValueError("Story Beat 不存在。")
+
+    _with_retry(_write)
+    row = _fetch_one(select(story_beats).where(story_beats.c.id == beat_id), db_path=db_path)
+    if row is None:
+        raise ValueError("Story Beat 不存在。")
+    return _row_to_story_beat(row)
+
+
+def create_story_suggestion(
+    *, storyboard_id: int, suggestion_type: str, explanation: str, source_beat_id: int | None = None,
+    target_beat_id: int | None = None, clip_id: int | None = None, suggested_intent: str | None = None,
+    suggested_script: str | None = None, suggested_thesis: str | None = None,
+    payload_json: dict[str, Any] | None = None, error_message: str | None = None,
+    db_path: Path = _DB_PATH,
+) -> StorySuggestionRecord:
+    """记录 AI 的候选修改，默认 pending，绝不直接修改故事内容。"""
+    engine = get_engine(db_path)
+
+    def _write() -> int:
+        with _DB_LOCK:
+            with engine.begin() as conn:
+                now = _utcnow()
+                if clip_id is not None:
+                    conn.execute(
+                        update(story_suggestions)
+                        .where(
+                            story_suggestions.c.storyboard_id == storyboard_id,
+                            story_suggestions.c.clip_id == clip_id,
+                            story_suggestions.c.status == "pending",
+                        )
+                        .values(status="superseded", updated_at=now)
+                    )
+                result = conn.execute(insert(story_suggestions).values(
+                    storyboard_id=storyboard_id, suggestion_type=suggestion_type.strip() or "move_interpretation",
+                    status="pending", source_beat_id=source_beat_id, target_beat_id=target_beat_id, clip_id=clip_id,
+                    explanation=explanation.strip(), suggested_intent=suggested_intent.strip() if suggested_intent else None,
+                    suggested_script=suggested_script.strip() if suggested_script else None,
+                    suggested_thesis=suggested_thesis.strip() if suggested_thesis else None,
+                    payload_json=payload_json, error_message=error_message, created_at=now, updated_at=now,
+                ))
+                return int(result.inserted_primary_key[0])
+
+    suggestion_id = _with_retry(_write)
+    row = _fetch_one(select(story_suggestions).where(story_suggestions.c.id == suggestion_id), db_path=db_path)
+    if row is None:
+        raise ValueError("故事建议创建失败。")
+    return _row_to_story_suggestion(row)
+
+
+def list_story_suggestions(storyboard_id: int, *, status: str | None = None, db_path: Path = _DB_PATH) -> list[StorySuggestionRecord]:
+    """读取故事建议，pending 时供 Canvas 恢复待确认卡片。"""
+    statement = select(story_suggestions).where(story_suggestions.c.storyboard_id == storyboard_id)
+    if status:
+        statement = statement.where(story_suggestions.c.status == status)
+    rows = _fetch_all(statement.order_by(story_suggestions.c.created_at.desc(), story_suggestions.c.id.desc()), db_path=db_path)
+    return [_row_to_story_suggestion(row) for row in rows]
+
+
+def resolve_story_suggestion(*, suggestion_id: int, apply: bool, db_path: Path = _DB_PATH) -> StorySuggestionRecord:
+    """由用户确认 Apply/Dismiss；Apply 只写建议所指向的局部 Beat。"""
+    engine = get_engine(db_path)
+
+    def _write() -> None:
+        with _DB_LOCK:
+            with engine.begin() as conn:
+                suggestion = conn.execute(select(story_suggestions).where(story_suggestions.c.id == suggestion_id)).mappings().first()
+                if suggestion is None:
+                    raise ValueError("故事建议不存在。")
+                if str(suggestion["status"]) != "pending":
+                    raise ValueError("该故事建议已经处理。")
+                now = _utcnow()
+                resolved_status = "applied" if apply else "dismissed"
+                if apply and suggestion.get("target_beat_id") is not None:
+                    target_id = int(suggestion["target_beat_id"])
+                    current = conn.execute(select(story_beats).where(story_beats.c.id == target_id)).mappings().first()
+                    payload = suggestion.get("payload_json") if isinstance(suggestion.get("payload_json"), dict) else {}
+                    relation_exists = True
+                    if suggestion.get("clip_id") is not None:
+                        relation_exists = conn.execute(
+                            select(story_beat_clips.c.id).where(
+                                story_beat_clips.c.beat_id == target_id,
+                                story_beat_clips.c.clip_id == int(suggestion["clip_id"]),
+                            )
+                        ).first() is not None
+                    stale = current is None or not relation_exists
+                    if current is not None and "base_intent" in payload:
+                        stale = stale or str(current.get("intent") or "") != str(payload["base_intent"])
+                    if current is not None and "base_script" in payload:
+                        stale = stale or str(current.get("script_text") or "") != str(payload["base_script"])
+                    if current is not None and "base_clip_ids" in payload:
+                        expected_ids = [int(item) for item in payload["base_clip_ids"]]
+                        current_ids = [
+                            int(item)
+                            for item in conn.execute(
+                                select(story_beat_clips.c.clip_id)
+                                .where(story_beat_clips.c.beat_id == target_id)
+                                .order_by(story_beat_clips.c.position.asc(), story_beat_clips.c.id.asc())
+                            ).scalars().all()
+                        ]
+                        stale = stale or current_ids != expected_ids
+                    if stale:
+                        resolved_status = "expired"
+                    else:
+                        values: dict[str, Any] = {"updated_at": now, "user_edited": True}
+                        if suggestion.get("suggested_intent"):
+                            values["intent"] = str(suggestion["suggested_intent"])
+                        if suggestion.get("suggested_script"):
+                            values["script_text"] = str(suggestion["suggested_script"])
+                        conn.execute(update(story_beats).where(story_beats.c.id == target_id).values(**values))
+                conn.execute(update(story_suggestions).where(story_suggestions.c.id == suggestion_id).values(status=resolved_status, updated_at=now))
+                conn.execute(update(storyboards).where(storyboards.c.id == int(suggestion["storyboard_id"])).values(updated_at=now))
+
+    _with_retry(_write)
+    row = _fetch_one(select(story_suggestions).where(story_suggestions.c.id == suggestion_id), db_path=db_path)
+    if row is None:
+        raise ValueError("故事建议不存在。")
+    return _row_to_story_suggestion(row)
 
 
 def add_storyboard_message(
@@ -2924,6 +3542,7 @@ def query_clip_detail(clip_id: int, db_path: Path = _DB_PATH) -> dict[str, Any] 
     row = _fetch_one(
         select(
             clips.c.id,
+            clips.c.video_hash,
             clips.c.library_id,
             clips.c.filename,
             clips.c.filepath,
@@ -3090,6 +3709,23 @@ def update_clip_asset_state(
     if comparison_error_message is not None:
         values["comparison_error_message"] = comparison_error_message
 
+    engine = get_engine(db_path)
+
+    def _write() -> None:
+        with _DB_LOCK:
+            with engine.begin() as conn:
+                conn.execute(update(clips).where(clips.c.id == clip_id).values(**values))
+
+    _with_retry(_write)
+
+
+def update_clip_file_location(clip_id: int, filepath: Path, db_path: Path = _DB_PATH) -> None:
+    """更新重新定位后的原始视频路径与修改时间。"""
+    values = {
+        "filepath": str(filepath),
+        "source_modified_at": filepath.stat().st_mtime,
+        "updated_at": _utcnow(),
+    }
     engine = get_engine(db_path)
 
     def _write() -> None:

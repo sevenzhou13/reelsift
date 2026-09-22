@@ -30,7 +30,7 @@
         <form id="duration-form" action="/storyboards/{{ storyboard.id }}/duration" method="post" class="mt-2">
           <div class="mb-2 flex items-center justify-between gap-3">
             <span id="duration-label" class="text-xl font-medium text-[#D7FF3E]">{{ storyboard.target_duration_seconds }} 秒</span>
-            <span id="duration-saving" class="hidden text-[11px] text-[#8A8A92]">重新生成中</span>
+            <span id="duration-saving" class="hidden text-[11px] text-[#8A8A92]">正在改写脚本</span>
           </div>
           <input id="duration-range" type="range" name="target_duration_seconds" min="15" max="1200" step="15" value="{{ storyboard.target_duration_seconds }}" class="w-full accent-[#D7FF3E]">
           <div class="mt-1 flex justify-between text-[10px] text-[#666670]">
@@ -60,10 +60,16 @@
     </div>
   </section>
 
-  {% if storyboard.status in ["framework_pending", "filling_pending"] %}
+  {% if storyboard.status in ["framework_pending", "filling_pending", "matching_pending"] %}
   <div class="mb-4 rounded-lg border border-[#4A3A22] bg-[#2A2114] px-4 py-3 text-sm text-[#E8C982]">
     <span class="mr-2 inline-block h-3 w-3 rounded-full border-2 border-[#E8C982]/30 border-t-[#E8C982] align-[-2px] animate-spin"></span>
-    {{ "正在生成叙事框架。" if storyboard.status == "framework_pending" else "正在填充脚本和素材排序。" }}
+    {% if storyboard.status == "framework_pending" %}
+    正在生成叙事框架。
+    {% elif storyboard.status == "matching_pending" %}
+    正在根据已确认脚本匹配素材顺序。
+    {% else %}
+    正在生成或改写脚本。
+    {% endif %}
   </div>
   {% endif %}
 
@@ -99,61 +105,65 @@
     <div class="mb-4 flex items-start justify-between gap-3">
       <div>
         <p class="text-[10px] uppercase tracking-[0.18em] text-[#8A8A92]">脚本</p>
-        <p class="mt-2 text-sm text-white">完整脚本；选中文字可指出错误，hover 段落可看素材。</p>
+        <p class="mt-2 text-sm text-white">脚本区是主舞台；你可以直接改，Agent 会读取当前文本。</p>
       </div>
-      <button id="script-edit-toggle" type="button" class="rounded-md border border-[#3A3A42] px-3 py-1.5 text-xs text-white transition hover:border-[#D7FF3E] hover:text-[#D7FF3E]">
-        edit
-      </button>
+      <span id="script-save-status" class="rounded-full border border-[#3A3A42] px-3 py-1 text-xs text-[#8A8A92]">已保存</span>
     </div>
 
-    <form id="script-edit-form" action="/storyboards/{{ storyboard.id }}/script" method="post" class="mb-4 hidden rounded-lg border border-[#313139] bg-[#0E0E10] p-3">
-      <textarea name="script_text" rows="16" required class="w-full resize-y rounded-md border border-[#313139] bg-[#151518] px-3 py-3 text-sm leading-7 text-white outline-none focus:border-[#D7FF3E]">{{ storyboard.script_text or "" }}</textarea>
-      <div class="mt-3 flex justify-end gap-2">
-        <button type="button" id="script-edit-cancel" class="rounded-md border border-[#3A3A42] px-3 py-2 text-xs text-white transition hover:border-white/20">取消</button>
-        <button type="submit" class="rounded-md bg-[#D7FF3E] px-3 py-2 text-xs font-medium text-[#0E0E10] transition hover:bg-[#e4ff7a]">保存脚本</button>
-      </div>
-    </form>
+    <textarea
+      id="script-main-editor"
+      name="script_text"
+      rows="18"
+      class="mb-4 w-full resize-y rounded-lg border border-[#313139] bg-[#0E0E10] px-5 py-5 text-[16px] leading-8 text-white outline-none transition focus:border-[#D7FF3E]"
+      placeholder="确认大纲后会在这里出现完整脚本，也可以直接输入你的初稿。"
+    >{{ storyboard.script_text or "" }}</textarea>
 
     <form id="script-selection-form" action="/storyboards/{{ storyboard.id }}/script/selection" method="post" class="mb-4 hidden rounded-lg border border-[#3A3A42] bg-[#0E0E10] p-3">
-      <p class="text-[10px] uppercase tracking-[0.18em] text-[#8A8A92]">局部修改</p>
+      <p class="text-[10px] uppercase tracking-[0.18em] text-[#8A8A92]">全局改稿定位</p>
       <p id="script-selection-preview" class="mt-2 line-clamp-3 rounded-md bg-[#151518] px-3 py-2 text-xs leading-5 text-[#D8D8DE]"></p>
       <input type="hidden" id="script-selected-text" name="selected_text">
-      <textarea name="correction_reason" rows="3" required placeholder="告诉 AI 这里为什么不对，例如：这句说我去了锦里，但素材里没有锦里，是人民公园。" class="mt-3 w-full resize-y rounded-md border border-[#313139] bg-[#151518] px-3 py-3 text-sm leading-6 text-white outline-none placeholder:text-[#5A5A62] focus:border-[#D7FF3E]"></textarea>
+      <textarea name="correction_reason" rows="3" required placeholder="告诉 AI 这里暴露了什么整体问题，例如：这段太像总结，前后情绪没接住；或这里事实不对，全文都要避免这个方向。" class="mt-3 w-full resize-y rounded-md border border-[#313139] bg-[#151518] px-3 py-3 text-sm leading-6 text-white outline-none placeholder:text-[#5A5A62] focus:border-[#D7FF3E]"></textarea>
       <div class="mt-3 flex justify-end gap-2">
         <button type="button" id="script-selection-cancel" class="rounded-md border border-[#3A3A42] px-3 py-2 text-xs text-white transition hover:border-white/20">取消</button>
-        <button type="submit" class="rounded-md bg-[#D7FF3E] px-3 py-2 text-xs font-medium text-[#0E0E10] transition hover:bg-[#e4ff7a]">让 AI 修改这段</button>
+        <button type="submit" class="rounded-md bg-[#D7FF3E] px-3 py-2 text-xs font-medium text-[#0E0E10] transition hover:bg-[#e4ff7a]">基于这里全局改稿</button>
       </div>
     </form>
 
-    <div id="script-display" class="rounded-lg bg-[#0E0E10] px-6 py-5">
-      {% for paragraph in script_paragraphs %}
-      <article class="group relative border-b border-[#24242A] py-5 first:pt-0 last:border-b-0 last:pb-0">
-        <p class="text-[16px] leading-8 text-white">{{ paragraph.text }}</p>
-        {% if paragraph.clip_items %}
-        <div class="pointer-events-none absolute bottom-full left-0 z-30 mb-2 hidden max-w-full rounded-lg border border-[#2A2A30] bg-[#0B0B0D]/95 p-2 shadow-2xl group-hover:block">
-          <div class="flex max-w-[520px] gap-1.5 overflow-hidden">
-            {% for item in paragraph.clip_items %}
-            {% set clip = item.clip %}
-            {% if clip %}
-            <a href="/clips/{{ clip.id }}?library_id={{ current_library_id }}&return_url=/storyboards/{{ storyboard.id }}" class="pointer-events-auto relative block h-12 w-16 shrink-0 overflow-hidden rounded-md border border-white/10 bg-[#24242A] transition hover:border-[#D7FF3E]" title="#{{ item.record.position }} {{ clip.filename }} / {{ clip.summary }}">
-              {% if clip.cover_url %}
-              <img src="{{ clip.cover_url }}" alt="{{ clip.filename }}" class="h-full w-full {% if clip.video_orientation == 'portrait' %}object-contain{% else %}object-cover{% endif %}">
-              {% endif %}
-              <span class="absolute left-1 top-1 rounded bg-black/70 px-1 py-0.5 text-[8px] leading-none text-white">{{ item.record.position }}</span>
-            </a>
-            {% endif %}
-            {% endfor %}
-          </div>
+    <section
+      id="pending-script-panel"
+      class="{% if not pending_script_action %}hidden {% endif %}mb-4 rounded-lg border border-[#D7FF3E]/40 bg-[#202214] p-4"
+    >
+      <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+        <div>
+          <p class="text-[10px] uppercase tracking-[0.18em] text-[#D7FF3E]">Agent 修订</p>
+          <p class="mt-2 text-sm text-white">逐段上下对比；原文中删掉的字标红，新稿中新增的字标蓝。</p>
         </div>
-        {% endif %}
-      </article>
-      {% else %}
-      <div class="px-4 py-16 text-center">
-        <p class="text-sm text-white">还没有生成完整脚本。</p>
-        <p class="mt-2 text-xs leading-5 text-[#8A8A92]">确认大纲后会在这里出现完整脚本。</p>
+        <div class="flex shrink-0 items-center gap-2">
+          <button id="pending-script-reject" type="button" class="rounded-md border border-[#3A3A42] px-3 py-2 text-xs text-white transition hover:border-white/20">拒绝修订</button>
+          <form id="pending-script-apply-form" action="/storyboards/{{ storyboard.id }}/script/apply" method="post">
+            <textarea id="pending-script-textarea" name="script_text" class="hidden">{{ pending_script_action.script_text if pending_script_action else "" }}</textarea>
+            <button type="submit" class="rounded-md bg-[#D7FF3E] px-3 py-2 text-xs font-medium text-[#0E0E10] transition hover:bg-[#e4ff7a]">应用当前选择</button>
+          </form>
+        </div>
       </div>
-      {% endfor %}
-    </div>
+      <div id="pending-script-revision" class="mt-3 space-y-3">
+        <div class="rounded-md border border-[#3A3A42] bg-[#0E0E10] p-4 text-sm leading-7 text-[#8A8A92]">
+          正在准备逐段修订预览。
+        </div>
+      </div>
+      <details class="mt-3 rounded-md border border-[#3A3A42] bg-[#0E0E10] p-3">
+        <summary class="cursor-pointer text-xs text-[#D7FF3E]">查看当前将应用的纯文本</summary>
+        <p id="pending-script-preview" class="mt-3 whitespace-pre-line text-sm leading-7 text-[#D8D8DE]"></p>
+      </details>
+    </section>
+
+    {% if storyboard.status != "matching_pending" %}
+    <form action="/storyboards/{{ storyboard.id }}/match-clips" method="post" class="mt-4 flex justify-end">
+      <button type="submit" class="rounded-lg bg-[#D7FF3E] px-4 py-2.5 text-sm font-medium text-[#0E0E10] transition hover:bg-[#e4ff7a]">
+        {{ "重新匹配素材" if story_items else "确认脚本并匹配素材" }}
+      </button>
+    </form>
+    {% endif %}
   </section>
   </div>
 
@@ -187,16 +197,24 @@
           <input type="hidden" name="tone_prompt" value="{{ message.action_json.tone_prompt }}">
           <textarea name="revision_prompt" class="hidden">{{ message.action_json.revision_prompt }}</textarea>
           <button type="submit" class="rounded-md bg-[#D7FF3E] px-3 py-2 text-xs font-medium text-[#0E0E10] transition hover:bg-[#e4ff7a]">
-            {{ message.action_json.label or "应用到脚本" }}
+            {{ message.action_json.label or "生成修订预览" }}
           </button>
         </form>
+        {% endif %}
+        {% if message.action_json and message.action_json.type == "apply_script_text" %}
+        <div class="mt-3">
+          <textarea class="hidden" data-script-candidate>{{ message.action_json.script_text }}</textarea>
+          <button type="button" data-show-script-revision class="rounded-md bg-[#D7FF3E] px-3 py-2 text-xs font-medium text-[#0E0E10] transition hover:bg-[#e4ff7a]">
+            生成修订预览
+          </button>
+        </div>
         {% endif %}
       </div>
     </article>
     {% else %}
     <div class="rounded-lg border border-dashed border-[#303038] bg-[#0E0E10] px-4 py-10 text-center">
       <p class="text-sm text-white">可以先问 Agent：“这批素材适合讲什么故事？”</p>
-      <p class="mt-2 text-xs leading-5 text-[#8A8A92]">对话会被保留；只有点击应用按钮才会修改脚本。</p>
+      <p class="mt-2 text-xs leading-5 text-[#8A8A92]">对话会被保留；点击应用只会改脚本文字，不会重排素材。</p>
     </div>
     {% endfor %}
   </div>
@@ -204,7 +222,7 @@
   <form id="agent-form" class="border-t border-[#25252B] p-4">
     <textarea id="agent-message" name="message" rows="3" required placeholder="例如：这些素材能不能讲一个更生活化、不那么像流水账的故事？" class="w-full resize-none rounded-lg border border-[#313139] bg-[#0E0E10] px-4 py-3 text-sm leading-6 text-white outline-none placeholder:text-[#5A5A62] focus:border-[#D7FF3E]"></textarea>
     <div class="mt-3 flex items-center justify-between gap-3">
-      <p class="text-xs text-[#8A8A92]">修改脚本前会先让你确认。</p>
+      <p class="text-xs text-[#8A8A92]">应用后只改脚本文字，素材顺序稍后确认。</p>
       <button id="agent-submit" type="submit" class="inline-flex items-center gap-2 rounded-lg bg-[#D7FF3E] px-4 py-2.5 text-sm font-medium text-[#0E0E10] transition hover:bg-[#e4ff7a]">
         <span id="agent-spinner" class="hidden h-4 w-4 rounded-full border-2 border-[#0E0E10]/30 border-t-[#0E0E10] animate-spin"></span>
         发送
@@ -218,7 +236,7 @@
   (() => {
     let agentBusy = false;
     const status = "{{ storyboard.status }}";
-    if (["framework_pending", "filling_pending"].includes(status)) {
+    if (["framework_pending", "filling_pending", "matching_pending"].includes(status)) {
       window.setTimeout(() => {
         if (!agentBusy) window.location.reload();
       }, 2500);
@@ -257,22 +275,62 @@
       });
     }
 
-    const scriptEditToggle = document.getElementById("script-edit-toggle");
-    const scriptEditCancel = document.getElementById("script-edit-cancel");
-    const scriptEditForm = document.getElementById("script-edit-form");
-    const scriptDisplay = document.getElementById("script-display");
-    if (scriptEditToggle && scriptEditForm && scriptDisplay) {
-      scriptEditToggle.addEventListener("click", () => {
-        scriptEditForm.classList.remove("hidden");
-        scriptDisplay.classList.add("hidden");
-        const textarea = scriptEditForm.querySelector("textarea");
-        if (textarea) textarea.focus();
-      });
-    }
-    if (scriptEditCancel && scriptEditForm && scriptDisplay) {
-      scriptEditCancel.addEventListener("click", () => {
-        scriptEditForm.classList.add("hidden");
-        scriptDisplay.classList.remove("hidden");
+    const scriptEditor = document.getElementById("script-main-editor");
+    const scriptSaveStatus = document.getElementById("script-save-status");
+    let saveTimer = null;
+    let saveController = null;
+    let lastSavedScript = scriptEditor ? scriptEditor.value : "";
+    const setScriptSaveStatus = (text, tone = "muted") => {
+      if (!scriptSaveStatus) return;
+      scriptSaveStatus.textContent = text;
+      scriptSaveStatus.className = tone === "saving"
+        ? "rounded-full border border-[#5a4510] bg-[#2b230d] px-3 py-1 text-xs text-[#f0d88b]"
+        : tone === "error"
+          ? "rounded-full border border-[#5A2525] bg-[#2A1515] px-3 py-1 text-xs text-[#f2b4b4]"
+          : "rounded-full border border-[#3A3A42] px-3 py-1 text-xs text-[#8A8A92]";
+    };
+    const saveScriptDraft = async () => {
+      if (!scriptEditor) return;
+      const scriptText = scriptEditor.value;
+      if (scriptText === lastSavedScript) {
+        setScriptSaveStatus("已保存");
+        return;
+      }
+      if (!scriptText.trim()) {
+        setScriptSaveStatus("脚本不能为空", "error");
+        return;
+      }
+      if (saveController) saveController.abort();
+      saveController = new AbortController();
+      setScriptSaveStatus("正在保存", "saving");
+      const formData = new FormData();
+      formData.append("script_text", scriptText);
+      try {
+        const response = await fetch("/storyboards/{{ storyboard.id }}/script", {
+          method: "POST",
+          body: formData,
+          headers: { "X-Requested-With": "fetch" },
+          signal: saveController.signal,
+        });
+        if (!response.ok) throw new Error(`保存失败：${response.status}`);
+        lastSavedScript = scriptText;
+        setScriptSaveStatus("已保存");
+      } catch (error) {
+        if (error.name === "AbortError") return;
+        setScriptSaveStatus("保存失败", "error");
+      }
+    };
+    const queueScriptSave = () => {
+      if (!scriptEditor) return;
+      setScriptSaveStatus("正在保存", "saving");
+      if (saveTimer) window.clearTimeout(saveTimer);
+      saveTimer = window.setTimeout(saveScriptDraft, 700);
+    };
+    if (scriptEditor) {
+      scriptEditor.addEventListener("input", queueScriptSave);
+      scriptEditor.addEventListener("blur", () => {
+        if (saveTimer) window.clearTimeout(saveTimer);
+        saveScriptDraft();
       });
     }
 
@@ -280,17 +338,24 @@
     const scriptSelectionCancel = document.getElementById("script-selection-cancel");
     const scriptSelectionPreview = document.getElementById("script-selection-preview");
     const scriptSelectedText = document.getElementById("script-selected-text");
-    const isSelectionInside = (selection, container) => {
-      if (!selection || selection.rangeCount === 0 || !container) return false;
-      const range = selection.getRangeAt(0);
-      return container.contains(range.commonAncestorContainer);
+    const pendingScriptPanel = document.getElementById("pending-script-panel");
+    const pendingScriptTextarea = document.getElementById("pending-script-textarea");
+    const pendingScriptPreview = document.getElementById("pending-script-preview");
+    const pendingScriptRevision = document.getElementById("pending-script-revision");
+    const pendingScriptReject = document.getElementById("pending-script-reject");
+    let revisionState = [];
+    const getSelectedScriptText = () => {
+      if (!scriptEditor) return "";
+      const start = scriptEditor.selectionStart ?? 0;
+      const end = scriptEditor.selectionEnd ?? 0;
+      if (end <= start) return "";
+      return scriptEditor.value.slice(start, end).trim();
     };
-    if (scriptDisplay && scriptSelectionForm && scriptSelectionPreview && scriptSelectedText) {
-      scriptDisplay.addEventListener("mouseup", () => {
+    if (scriptEditor && scriptSelectionForm && scriptSelectionPreview && scriptSelectedText) {
+      scriptEditor.addEventListener("mouseup", () => {
         window.setTimeout(() => {
-          const selection = window.getSelection();
-          const selected = selection ? selection.toString().trim() : "";
-          if (!selected || selected.length < 2 || !isSelectionInside(selection, scriptDisplay)) return;
+          const selected = getSelectedScriptText();
+          if (!selected || selected.length < 2) return;
           scriptSelectedText.value = selected;
           scriptSelectionPreview.textContent = selected;
           scriptSelectionForm.classList.remove("hidden");
@@ -298,14 +363,43 @@
           if (textarea) textarea.focus();
         }, 0);
       });
+      scriptEditor.addEventListener("keyup", () => {
+        const selected = getSelectedScriptText();
+        if (!selected || selected.length < 2) return;
+        scriptSelectedText.value = selected;
+        scriptSelectionPreview.textContent = selected;
+        scriptSelectionForm.classList.remove("hidden");
+      });
     }
     if (scriptSelectionCancel && scriptSelectionForm) {
       scriptSelectionCancel.addEventListener("click", () => {
         scriptSelectionForm.classList.add("hidden");
         if (scriptSelectedText) scriptSelectedText.value = "";
         if (scriptSelectionPreview) scriptSelectionPreview.textContent = "";
-        const selection = window.getSelection();
-        if (selection) selection.removeAllRanges();
+        if (scriptEditor) scriptEditor.setSelectionRange(scriptEditor.selectionEnd, scriptEditor.selectionEnd);
+      });
+    }
+    if (scriptSelectionForm) {
+      scriptSelectionForm.addEventListener("submit", async (event) => {
+        if (scriptSelectionForm.dataset.saving === "done") return;
+        event.preventDefault();
+        scriptSelectionForm.dataset.saving = "pending";
+        if (saveTimer) {
+          window.clearTimeout(saveTimer);
+          saveTimer = null;
+        }
+        await saveScriptDraft();
+        scriptSelectionForm.dataset.saving = "done";
+        scriptSelectionForm.requestSubmit();
+      });
+    }
+    if (pendingScriptReject && pendingScriptPanel && pendingScriptTextarea && pendingScriptPreview && pendingScriptRevision) {
+      pendingScriptReject.addEventListener("click", () => {
+        revisionState = [];
+        pendingScriptTextarea.value = "";
+        pendingScriptPreview.textContent = "";
+        pendingScriptRevision.textContent = "";
+        pendingScriptPanel.classList.add("hidden");
       });
     }
 
@@ -342,8 +436,293 @@
       return body;
     };
 
+    const stripScriptCandidate = (text) => {
+      const startMarker = "【脚本候选稿开始】";
+      const endMarker = "【脚本候选稿结束】";
+      const startIndex = text.indexOf(startMarker);
+      if (startIndex === -1) return text.trim();
+      const endIndex = text.indexOf(endMarker, startIndex);
+      if (endIndex === -1) return text.slice(0, startIndex).trim();
+      return (text.slice(0, startIndex) + text.slice(endIndex + endMarker.length)).trim();
+    };
+
+    const splitScriptParagraphs = (text) => {
+      const cleaned = (text || "").trim();
+      if (!cleaned) return [];
+      let parts = cleaned.split(/\n\s*\n+/).map((part) => part.trim()).filter(Boolean);
+      if (parts.length <= 1) {
+        const lineParts = cleaned.split(/\n+/).map((part) => part.trim()).filter(Boolean);
+        if (lineParts.length > 1) parts = lineParts;
+      }
+      return parts;
+    };
+
+    const buildParagraphRevisionState = (currentText, candidateText) => {
+      const oldParts = splitScriptParagraphs(currentText);
+      const newParts = splitScriptParagraphs(candidateText);
+      if (!oldParts.length) {
+        return newParts.map((newText) => ({ tag: "insert", oldText: "", newText, choice: "new" }));
+      }
+      const dp = Array.from({ length: oldParts.length + 1 }, () => Array(newParts.length + 1).fill(0));
+      for (let i = oldParts.length - 1; i >= 0; i -= 1) {
+        for (let j = newParts.length - 1; j >= 0; j -= 1) {
+          dp[i][j] = oldParts[i] === newParts[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+        }
+      }
+
+      const state = [];
+      let oldIndex = 0;
+      let newIndex = 0;
+      const pushChangedRun = (oldRun, newRun) => {
+        const pairedCount = Math.min(oldRun.length, newRun.length);
+        for (let index = 0; index < pairedCount; index += 1) {
+          state.push({ tag: "replace", oldText: oldRun[index], newText: newRun[index], choice: "new" });
+        }
+        oldRun.slice(pairedCount).forEach((oldText) => {
+          state.push({ tag: "delete", oldText, newText: "", choice: "new" });
+        });
+        newRun.slice(pairedCount).forEach((newText) => {
+          state.push({ tag: "insert", oldText: "", newText, choice: "new" });
+        });
+      };
+
+      while (oldIndex < oldParts.length || newIndex < newParts.length) {
+        if (oldIndex < oldParts.length && newIndex < newParts.length && oldParts[oldIndex] === newParts[newIndex]) {
+          state.push({ tag: "equal", oldText: oldParts[oldIndex], newText: newParts[newIndex], choice: "old" });
+          oldIndex += 1;
+          newIndex += 1;
+          continue;
+        }
+
+        const oldRun = [];
+        const newRun = [];
+        while (
+          oldIndex < oldParts.length &&
+          newIndex < newParts.length &&
+          oldParts[oldIndex] !== newParts[newIndex]
+        ) {
+          if (dp[oldIndex + 1][newIndex] >= dp[oldIndex][newIndex + 1]) {
+            oldRun.push(oldParts[oldIndex]);
+            oldIndex += 1;
+          } else {
+            newRun.push(newParts[newIndex]);
+            newIndex += 1;
+          }
+        }
+        while (oldIndex < oldParts.length && (newIndex >= newParts.length || dp[oldIndex + 1][newIndex] >= dp[oldIndex][newIndex])) {
+          oldRun.push(oldParts[oldIndex]);
+          oldIndex += 1;
+        }
+        while (newIndex < newParts.length && (oldIndex >= oldParts.length || dp[oldIndex][newIndex + 1] > dp[oldIndex][newIndex])) {
+          newRun.push(newParts[newIndex]);
+          newIndex += 1;
+        }
+        pushChangedRun(oldRun, newRun);
+      }
+      return state;
+    };
+
+    const getFinalRevisionText = () => {
+      return revisionState
+        .map((item) => {
+          if (item.tag === "equal") return item.oldText;
+          if (item.tag === "insert") return item.choice === "new" ? item.newText : "";
+          if (item.tag === "delete") return item.choice === "new" ? "" : item.oldText;
+          return item.choice === "new" ? item.newText : item.oldText;
+        })
+        .filter((part) => part && part.trim())
+        .join("\n\n");
+    };
+
+    const updatePendingScriptText = () => {
+      const finalText = getFinalRevisionText();
+      if (pendingScriptTextarea) pendingScriptTextarea.value = finalText;
+      if (pendingScriptPreview) pendingScriptPreview.textContent = finalText;
+    };
+
+    const buildInlineDiff = (oldText, newText) => {
+      const oldChars = Array.from(oldText || "");
+      const newChars = Array.from(newText || "");
+      const dp = Array.from({ length: oldChars.length + 1 }, () => Array(newChars.length + 1).fill(0));
+      for (let i = oldChars.length - 1; i >= 0; i -= 1) {
+        for (let j = newChars.length - 1; j >= 0; j -= 1) {
+          dp[i][j] = oldChars[i] === newChars[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+        }
+      }
+
+      const oldParts = [];
+      const newParts = [];
+      let i = 0;
+      let j = 0;
+      const pushPart = (parts, tag, text) => {
+        if (!text) return;
+        const last = parts[parts.length - 1];
+        if (last && last.tag === tag) {
+          last.text += text;
+        } else {
+          parts.push({ tag, text });
+        }
+      };
+
+      while (i < oldChars.length || j < newChars.length) {
+        if (i < oldChars.length && j < newChars.length && oldChars[i] === newChars[j]) {
+          pushPart(oldParts, "equal", oldChars[i]);
+          pushPart(newParts, "equal", newChars[j]);
+          i += 1;
+          j += 1;
+        } else if (j < newChars.length && (i >= oldChars.length || dp[i][j + 1] >= dp[i + 1][j])) {
+          pushPart(newParts, "insert", newChars[j]);
+          j += 1;
+        } else if (i < oldChars.length) {
+          pushPart(oldParts, "delete", oldChars[i]);
+          i += 1;
+        }
+      }
+      return { oldParts, newParts };
+    };
+
+    const appendInlineParts = (target, parts, highlightTag, highlightClass) => {
+      parts.forEach((part) => {
+        const span = document.createElement("span");
+        span.textContent = part.text;
+        if (part.tag === highlightTag) span.className = highlightClass;
+        target.appendChild(span);
+      });
+    };
+
+    const createParagraph = (label, text, colorClass, inlineParts = null, highlightTag = "", highlightClass = "") => {
+      const box = document.createElement("div");
+      box.className = `rounded-md border px-3 py-3 ${colorClass}`;
+      const title = document.createElement("p");
+      title.className = "mb-2 text-[10px] uppercase tracking-[0.16em]";
+      title.textContent = label;
+      const body = document.createElement("p");
+      body.className = "whitespace-pre-line text-sm leading-7";
+      if (inlineParts) {
+        appendInlineParts(body, inlineParts, highlightTag, highlightClass);
+      } else {
+        body.textContent = text;
+      }
+      box.appendChild(title);
+      box.appendChild(body);
+      return box;
+    };
+
+    const createChoiceButton = (index, choice, label, active) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.dataset.revisionIndex = String(index);
+      button.dataset.revisionChoice = choice;
+      button.className = active
+        ? "rounded-md bg-[#D7FF3E] px-3 py-1.5 text-xs font-medium text-[#0E0E10]"
+        : "rounded-md border border-[#3A3A42] px-3 py-1.5 text-xs text-white transition hover:border-white/20";
+      button.textContent = label;
+      button.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        if (!revisionState[index]) return;
+        revisionState[index].choice = choice;
+        renderRevisionState();
+      });
+      return button;
+    };
+
+    const renderRevisionState = () => {
+      if (!pendingScriptRevision) return;
+      pendingScriptRevision.replaceChildren();
+      revisionState.forEach((item, index) => {
+        const card = document.createElement("article");
+        card.className = item.tag === "equal"
+          ? "rounded-lg border border-[#24242A] bg-[#0E0E10] px-4 py-3 opacity-70"
+          : "rounded-lg border border-[#3A3A42] bg-[#0E0E10] p-4";
+
+        if (item.tag === "equal") {
+          card.appendChild(createParagraph("未改动", item.oldText, "border-transparent bg-transparent text-[#B8B8C2]"));
+          pendingScriptRevision.appendChild(card);
+          return;
+        }
+
+        const stack = document.createElement("div");
+        stack.className = "space-y-3";
+        const inlineDiff = buildInlineDiff(item.oldText || "", item.newText || "");
+        if (item.oldText) {
+          stack.appendChild(createParagraph(
+            "原文",
+            item.oldText,
+            "border-[#2A2A30] bg-[#111114] text-[#D8D8DE]",
+            inlineDiff.oldParts,
+            "delete",
+            "rounded bg-[#3A1818] px-0.5 text-[#FF9B9B]"
+          ));
+        }
+        if (item.newText) {
+          stack.appendChild(createParagraph(
+            item.tag === "insert" ? "新增段落" : "新稿",
+            item.newText,
+            "border-[#2A2A30] bg-[#111114] text-[#D8D8DE]",
+            inlineDiff.newParts,
+            "insert",
+            "rounded bg-[#132A42] px-0.5 text-[#8EC7FF]"
+          ));
+        }
+        card.appendChild(stack);
+
+        const actions = document.createElement("div");
+        actions.className = "mt-3 flex flex-wrap justify-end gap-2";
+        const acceptLabel = item.tag === "delete" ? "接受删除" : "接受本段";
+        const keepLabel = item.tag === "insert" ? "不加入这段" : "保留原文";
+        const acceptedLabel = item.tag === "delete" ? "已接受删除" : "已接受本段";
+        const keptLabel = item.tag === "insert" ? "已不加入" : "已保留原文";
+        actions.appendChild(createChoiceButton(index, "new", item.choice === "new" ? acceptedLabel : acceptLabel, item.choice === "new"));
+        actions.appendChild(createChoiceButton(index, "old", item.choice === "old" ? keptLabel : keepLabel, item.choice === "old"));
+        card.appendChild(actions);
+        pendingScriptRevision.appendChild(card);
+      });
+      updatePendingScriptText();
+    };
+
+    const showPendingScript = (scriptText) => {
+      if (!scriptText || !pendingScriptPanel || !pendingScriptTextarea || !pendingScriptPreview || !pendingScriptRevision) return;
+      const currentScript = scriptEditor ? scriptEditor.value : "";
+      revisionState = buildParagraphRevisionState(currentScript, scriptText);
+      renderRevisionState();
+      pendingScriptPanel.classList.remove("hidden");
+      pendingScriptPanel.scrollIntoView({ behavior: "smooth", block: "start" });
+    };
+
+    const createRevisionPreviewButton = (scriptText) => {
+      const wrap = document.createElement("div");
+      wrap.className = "mt-3";
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "rounded-md bg-[#D7FF3E] px-3 py-2 text-xs font-medium text-[#0E0E10] transition hover:bg-[#e4ff7a]";
+      button.textContent = "生成修订预览";
+      button.addEventListener("click", () => showPendingScript(scriptText || ""));
+      wrap.appendChild(button);
+      return wrap;
+    };
+
+    if (list) {
+      list.addEventListener("click", (event) => {
+        const button = event.target.closest("[data-show-script-revision]");
+        if (!button) return;
+        const wrapper = button.closest("div");
+        const candidate = wrapper ? wrapper.querySelector("[data-script-candidate]") : null;
+        showPendingScript(candidate ? candidate.value : "");
+      });
+    }
+
+    if (pendingScriptPanel && pendingScriptTextarea && pendingScriptTextarea.value.trim()) {
+      showPendingScript(pendingScriptTextarea.value);
+    }
+
     const appendAction = (bubble, action) => {
-      if (!action || action.type !== "revise_script") return;
+      if (!action || !["revise_script", "apply_script_text"].includes(action.type)) return;
+      if (action.type === "apply_script_text") {
+        bubble.appendChild(createRevisionPreviewButton(action.script_text || ""));
+        showPendingScript(action.script_text || "");
+        return;
+      }
       const form = document.createElement("form");
       form.action = "/storyboards/{{ storyboard.id }}/revise";
       form.method = "post";
@@ -356,7 +735,7 @@
       `;
       form.querySelector('input[name="tone_prompt"]').value = action.tone_prompt || {{ storyboard.tone_prompt|tojson }};
       form.querySelector('textarea[name="revision_prompt"]').value = action.revision_prompt || "";
-      form.querySelector("button").textContent = action.label || "应用到脚本";
+      form.querySelector("button").textContent = action.label || "生成修订预览";
       bubble.appendChild(form);
     };
 
@@ -383,6 +762,7 @@
       input.value = "";
       const assistant = createBubble("assistant", "");
       const reasoning = createReasoning(assistant.bubble);
+      let assistantTextBuffer = "";
       agentBusy = true;
       submit.disabled = true;
       spinner.classList.remove("hidden");
@@ -391,6 +771,14 @@
       try {
         const formData = new FormData();
         formData.append("message", message);
+        if (saveTimer) {
+          window.clearTimeout(saveTimer);
+          saveTimer = null;
+        }
+        await saveScriptDraft();
+        if (scriptEditor && scriptEditor.value.trim()) {
+          formData.append("draft_script_text", scriptEditor.value);
+        }
         const response = await fetch("/storyboards/{{ storyboard.id }}/agent/stream", {
           method: "POST",
           body: formData,
@@ -409,8 +797,18 @@
             const parsed = parseSseBlock(block);
             if (!parsed) return;
             if (parsed.event === "reasoning") reasoning.textContent += parsed.data.text || "";
-            if (parsed.event === "content") assistant.body.textContent += parsed.data.text || "";
-            if (parsed.event === "done") appendAction(assistant.bubble, parsed.data.action);
+            if (parsed.event === "content") {
+              assistantTextBuffer += parsed.data.text || "";
+              assistant.body.textContent = stripScriptCandidate(assistantTextBuffer);
+            }
+            if (parsed.event === "done") {
+              if (parsed.data.action && parsed.data.action.display_text) {
+                assistant.body.textContent = parsed.data.action.display_text;
+              } else {
+                assistant.body.textContent = stripScriptCandidate(assistantTextBuffer);
+              }
+              appendAction(assistant.bubble, parsed.data.action);
+            }
             if (parsed.event === "error") assistant.body.textContent += `\n\n生成失败：${parsed.data.message || "未知错误"}`;
             scrollBottom();
           });
@@ -422,7 +820,7 @@
         submit.disabled = false;
         spinner.classList.add("hidden");
         statusLabel.textContent = "就绪";
-        if (["framework_pending", "filling_pending"].includes(status)) {
+        if (["framework_pending", "filling_pending", "matching_pending"].includes(status)) {
           window.setTimeout(() => window.location.reload(), 1200);
         }
         scrollBottom();

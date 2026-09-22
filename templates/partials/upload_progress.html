@@ -11,7 +11,7 @@
 >
   <div class="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
     <div class="min-w-0">
-      <p class="text-[10px] uppercase tracking-[0.18em] text-[#8A8A92]">Upload Progress</p>
+      <p class="text-[10px] uppercase tracking-[0.18em] text-[#8A8A92]">Analysis Progress</p>
       <p class="mt-2 truncate text-sm text-white">
         {{ active_upload_job.library_name }} / {{ active_upload_job.batch_name }}
       </p>
@@ -19,7 +19,7 @@
     </div>
     <div class="min-w-[260px] flex-1 lg:max-w-[420px]">
       <div class="mb-2 flex items-center justify-between text-sm">
-        <span class="text-white">已上传 {{ summary.done }} / {{ summary.total }} 条</span>
+        <span class="text-white">已完成 {{ summary.done }} / {{ summary.total }} 条</span>
         <span class="text-[#D7FF3E]">{{ summary.progress }}%</span>
       </div>
       <div class="h-2 overflow-hidden rounded-full bg-[#2A2A30]">

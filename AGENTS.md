@@ -61,6 +61,23 @@ reelsift/
 ├── static/
 │   └── style.css            # 自定义样式（Tailwind 不够用时）
 │
+├── scripts/                 # 辅助脚本（Finder 服务、安装等）
+│   ├── install_finder_quick_action.sh      # 安装两个 Finder 快速操作
+│   ├── install_native_finder_service.sh    # 构建并安装原生 Swift 导演台 App
+│   ├── reelsift_finder_scan.py             # 快速操作「扫描素材」入口
+│   ├── reelsift_finder_organize.py         # 快速操作「AI 整理并命名」主逻辑
+│   ├── reelsift_finder_organize_launcher.sh  # 整理入口启动器
+│   ├── reelsift_finder_dialog.swift        # AppKit 弹窗（选模式 / 报完成）
+│   └── reelsift_director_bridge.py         # 原生导演台与 Python 的桥接
+│
+├── finder/                  # macOS Finder 快速操作（Automator 工作流）
+│   ├── Reelsift 扫描素材.workflow
+│   └── Reelsift AI 整理并命名素材.workflow
+│
+├── macos/                   # 原生 macOS 导演台 App（Swift/AppKit）
+│   ├── ReelsiftFinderService.swift
+│   └── ReelsiftFinderService.app
+│
 └── data/                    # 运行时数据（gitignore）
     ├── reelsift.db          # SQLite 数据库
     ├── uploads/             # 上传原始视频
@@ -207,6 +224,12 @@ python reelsift.py /path/to/my/videos
 
 # Windows PowerShell
 .\.venv\Scripts\python.exe -m uvicorn server:app --reload --host 127.0.0.1 --port 8000
+
+# 安装 Finder 快速操作（扫描素材 / AI 整理并命名）
+./scripts/install_finder_quick_action.sh
+
+# 构建并安装原生 Finder 导演台 App
+./scripts/install_native_finder_service.sh
 
 # 清空缓存重新处理
 rm -rf data/thumbnails data/previews data/reelsift.db

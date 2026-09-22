@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import difflib
 import json
 import hashlib
 import mimetypes
@@ -97,9 +98,12 @@ from db import (
     move_project_node,
     move_clip_to_node,
     update_clip_asset_state as db_update_clip_asset_state,
+    update_clip_file_location,
     update_clip_cut_segment_export_path,
     update_clip_cut_segment_range,
     update_clip_note,
+    update_clip_detail,
+    update_library_memory_note,
     update_clip_note_status,
     update_clip_review,
     update_clip_transcript_state as db_update_clip_transcript_state,
@@ -107,18 +111,20 @@ from db import (
     update_storyboard_run,
     update_storyboard_error,
     update_storyboard_framework,
+    update_storyboard_items,
     update_storyboard_result,
     update_storyboard_script,
     update_storyboard_status,
 )
 from metrics import build_comparison_ranking, build_comparison_scores, select_cover_frame
-from pipeline import VIDEO_EXTENSIONS, build_video_hash, extract_keyframes, get_keyframe_paths
+from pipeline import VIDEO_EXTENSIONS, build_video_hash, extract_keyframes, get_keyframe_paths, scan_folder
 from story_ai import (
     DEFAULT_TONE_PROMPT,
     StoryClipContext,
     format_storyboard_framework,
+    generate_storyboard_clip_order,
     generate_storyboard_framework,
-    generate_storyboard_plan,
+    generate_storyboard_script,
     rewrite_script_selection,
     stream_story_agent_reply,
 )
@@ -253,6 +259,7 @@ class ClipDetail:
     media_url: str | None
     media_type: str | None
     media_error_message: str | None
+    source_missing: bool
     preview_status: str
     preview_path: str | None
     status: str
@@ -302,6 +309,12 @@ app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 app.mount("/data", StaticFiles(directory=BASE_DIR / "data"), name="data")
 templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
 init_db(DB_PATH)
+
+
+@app.get("/api/health", include_in_schema=False)
+def health_check() -> dict[str, bool]:
+    """返回本地服务存活状态，供 Finder 快速操作探测。"""
+    return {"ok": True}
 
 # 服务启动时在后台预编译 Swift 文件夹选择器，第一次点击"浏览"时就不需要等待编译
 if sys.platform == "darwin":
@@ -412,10 +425,13 @@ def build_common_context(request: Request) -> dict[str, Any]:
 async def require_login_middleware(request: Request, call_next):
     path = request.url.path
     public_prefixes = ("/static", "/login", "/admin/login", "/register", "/forgot-password")
-    if path.startswith(public_prefixes) or path == "/favicon.ico":
+    if path.startswith(public_prefixes) or path in {"/favicon.ico", "/api/health"}:
         return await call_next(request)
     if get_current_user(request) is None:
-        return RedirectResponse(url="/login", status_code=303)
+        next_url = path
+        if request.url.query:
+            next_url = f"{next_url}?{request.url.query}"
+        return RedirectResponse(url=f"/login?next_url={quote(next_url, safe='')}", status_code=303)
     return await call_next(request)
 
 
@@ -981,7 +997,8 @@ def load_clip_detail(clip_id: int) -> ClipDetail | None:
     media_type: str | None = None
     media_error_message: str | None = None
     preview_status = row.get("preview_status") or "pending"
-    if file_path.exists():
+    source_missing = not file_path.exists()
+    if not source_missing:
         stat = file_path.stat()
         file_size_text = format_file_size(stat.st_size)
         shot_time_text = datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M")
@@ -990,6 +1007,8 @@ def load_clip_detail(clip_id: int) -> ClipDetail | None:
             media_url = build_data_url_from_path(preview_path)
             media_type = "video/mp4"
         media_error_message = row.get("preview_error_message")
+    else:
+        media_error_message = "原始素材已移动或不可访问。请重新选择包含该素材的文件夹。"
 
     cover_path = row.get("cover_path")
     aspect_info = build_video_aspect_info(cover_path, row.get("filepath"))
@@ -1025,6 +1044,7 @@ def load_clip_detail(clip_id: int) -> ClipDetail | None:
         media_url=media_url,
         media_type=media_type,
         media_error_message=media_error_message,
+        source_missing=source_missing,
         preview_status=preview_status,
         preview_path=row.get("preview_path"),
         status=row.get("status") or "pending",
@@ -1161,6 +1181,45 @@ def save_uploaded_files(
     return saved_paths, skipped_items, source_modified_map
 
 
+def prepare_folder_scan(folder: Path, library_id: int) -> tuple[list[Path], list[UploadItemState], dict[str, float | None]]:
+    """扫描用户选择的本地文件夹，只记录原始文件路径，不复制视频。"""
+    resolved_folder = folder.expanduser().resolve()
+    if not resolved_folder.is_dir():
+        raise HTTPException(status_code=400, detail="选择的素材文件夹不存在或不可访问。")
+
+    videos = scan_folder(resolved_folder)
+    if not videos:
+        raise HTTPException(status_code=400, detail="该文件夹及其子文件夹中没有支持的视频文件。")
+    if len(videos) > 200:
+        raise HTTPException(status_code=400, detail="一次最多扫描 200 条视频，请分批选择子文件夹。")
+
+    ready_paths: list[Path] = []
+    skipped_items: list[UploadItemState] = []
+    source_modified_map: dict[str, float | None] = {}
+    seen_hashes: set[str] = set()
+    for video in videos:
+        content_hash = build_file_content_hash(video)
+        modified_at = video.stat().st_mtime
+        if content_hash in seen_hashes or clip_exists_in_library_by_hash(content_hash, library_id, DB_PATH) or clip_exists_by_hash(content_hash, DB_PATH):
+            skipped_items.append(
+                UploadItemState(
+                    filename=video.name,
+                    filepath=str(video),
+                    stage="skipped",
+                    progress=100,
+                    detail="素材库已存在同一视频，未复制也未重复分析",
+                    finished_at=time.time(),
+                    skipped=True,
+                    source_modified_at=modified_at,
+                )
+            )
+            continue
+        seen_hashes.add(content_hash)
+        ready_paths.append(video)
+        source_modified_map[str(video)] = modified_at
+    return ready_paths, skipped_items, source_modified_map
+
+
 def resolve_upload_library(request: Request, library_id_input: int | None, new_library_name: str) -> LibraryRecord:
     """根据上传页输入，决定这批视频要归属的素材库。"""
     user = require_user(request)
@@ -1192,6 +1251,7 @@ def build_upload_page_context(
     error_message: str | None = None,
     selected_library_id: int | None = None,
     pending_library_name: str = "",
+    auto_scan_folder: str = "",
 ) -> dict[str, Any]:
     """构造上传页上下文。"""
     libraries = get_visible_libraries(request)
@@ -1203,6 +1263,7 @@ def build_upload_page_context(
         "libraries": libraries,
         "selected_library_id": current_library_id,
         "pending_library_name": pending_library_name,
+        "auto_scan_folder": auto_scan_folder,
     }
 
 
@@ -1379,10 +1440,13 @@ def start_upload_job(
     library: LibraryRecord,
     skipped_items: list[UploadItemState] | None = None,
     source_modified_map: dict[str, float | None] | None = None,
+    source_label: str = "已保存到本地工作目录",
+    job_message: str = "文件上传完成",
+    batch_dir: Path | None = None,
 ) -> UploadJobState:
     """创建后台处理任务。"""
     job_id = uuid.uuid4().hex[:12]
-    batch_dir = saved_paths[0].parent if saved_paths else UPLOADS_DIR
+    batch_dir = batch_dir or (saved_paths[0].parent if saved_paths else UPLOADS_DIR)
     resolved_skipped_items = skipped_items or []
     resolved_source_modified_map = source_modified_map or {}
     job = UploadJobState(
@@ -1397,13 +1461,13 @@ def start_upload_job(
                 filepath=str(path),
                 stage="saved",
                 progress=STAGE_META["saved"]["progress"],
-                detail="已保存到本地工作目录",
+                detail=source_label,
                 source_modified_at=resolved_source_modified_map.get(str(path)),
             )
             for path in saved_paths
         ] + resolved_skipped_items,
         status="processing",
-        message=f"文件上传完成，准备写入素材库「{library.name}」",
+        message=f"{job_message}，准备写入素材库「{library.name}」",
         redirect_url=f"/?library_id={library.id}",
     )
 
@@ -1544,7 +1608,7 @@ def process_upload_job(job_id: str, video_paths: list[Path], library_id: int) ->
         try:
             video_hash = build_file_content_hash(video)
             update_upload_item(job_id, video, stage="extracting", detail="正在抽取关键帧")
-            _, frame_dir = extract_keyframes(video, CACHE_DIR)
+            _, frame_dir = extract_keyframes(video, CACHE_DIR, cache_key=video_hash[:12])
             frames = get_keyframe_paths(frame_dir)
             if not frames:
                 raise RuntimeError("没有成功抽取关键帧")
@@ -1575,6 +1639,8 @@ def process_upload_job(job_id: str, video_paths: list[Path], library_id: int) ->
                     filepath=video,
                     library_id=library_id,
                     summary=analysis.summary,
+                    rename_title=analysis.rename_title,
+                    detail_summary=analysis.detail,
                     scene=analysis.scene,
                     subjects=analysis.subjects,
                     actions=analysis.actions,
@@ -1942,16 +2008,25 @@ def build_script_paragraphs(storyboard: StoryboardRecord, story_items: list[dict
     return result
 
 
-def save_storyboard_plan(storyboard: StoryboardRecord, plan, revision_prompt: str | None = None) -> None:
-    """把模型输出写入故事线和排序清单。"""
+def save_storyboard_script(storyboard: StoryboardRecord, script, revision_prompt: str | None = None) -> None:
+    """把模型输出写入故事脚本，并清空旧素材排序。"""
     update_storyboard_result(
         storyboard_id=storyboard.id,
-        title=plan.title,
-        core_message=plan.core_message,
-        emotional_arc=plan.emotional_arc,
-        story_plan=plan.story_plan,
-        script_text=plan.first_person_script,
+        title=script.title,
+        core_message=script.core_message,
+        emotional_arc=script.emotional_arc,
+        story_plan=script.story_plan,
+        script_text=script.first_person_script,
         revision_prompt=revision_prompt,
+        items=[],
+        db_path=DB_PATH,
+    )
+
+
+def save_storyboard_clip_order(storyboard: StoryboardRecord, clip_order) -> None:
+    """把脚本确认后的素材排序写入故事线。"""
+    update_storyboard_items(
+        storyboard_id=storyboard.id,
         items=[
             StoryboardItemRecord(
                 id=0,
@@ -1964,7 +2039,7 @@ def save_storyboard_plan(storyboard: StoryboardRecord, plan, revision_prompt: st
                 script_line=item.script_line,
                 reason=item.reason,
             )
-            for item in plan.clip_order
+            for item in clip_order.clip_order
         ],
         db_path=DB_PATH,
     )
@@ -1975,9 +2050,16 @@ def should_offer_script_apply(user_message: str, assistant_text: str) -> bool:
     combined = f"{user_message}\n{assistant_text}".lower()
     keywords = [
         "修改",
+        "修订",
+        "改稿",
+        "优化",
+        "润色",
         "重写",
         "改成",
         "调整",
+        "删掉",
+        "删除",
+        "加上",
         "压到",
         "控制在",
         "换成",
@@ -1993,8 +2075,34 @@ def should_offer_script_apply(user_message: str, assistant_text: str) -> bool:
     return any(keyword in combined for keyword in keywords)
 
 
+def extract_script_candidate(assistant_text: str) -> str | None:
+    """从 Agent 回复中提取可直接应用的完整脚本候选稿。"""
+    match = re.search(r"【脚本候选稿开始】\s*(.*?)\s*【脚本候选稿结束】", assistant_text, re.S)
+    if not match:
+        return None
+    candidate = match.group(1).strip()
+    if len(candidate) < 8:
+        return None
+    return candidate
+
+
+def strip_script_candidate(assistant_text: str) -> str:
+    """聊天区只保留改动说明，不展示完整候选稿。"""
+    stripped = re.sub(r"【脚本候选稿开始】.*?【脚本候选稿结束】", "", assistant_text, flags=re.S).strip()
+    return stripped or "我已经生成了一版完整改稿，可以在脚本区预览后应用。"
+
+
 def build_script_action(user_message: str, assistant_text: str, storyboard: StoryboardRecord) -> dict[str, Any]:
     """把 Agent 建议整理成用户确认后可执行的脚本修改动作。"""
+    script_candidate = extract_script_candidate(assistant_text)
+    if script_candidate:
+        return {
+            "type": "apply_script_text",
+            "label": "应用这版脚本",
+            "script_text": script_candidate,
+            "display_text": strip_script_candidate(assistant_text),
+        }
+
     revision_prompt = "\n".join(
         part.strip()
         for part in [
@@ -2007,11 +2115,58 @@ def build_script_action(user_message: str, assistant_text: str, storyboard: Stor
     )
     return {
         "type": "revise_script",
-        "label": "应用到脚本",
+        "label": "生成修订预览",
         "revision_prompt": revision_prompt,
         "target_duration_seconds": storyboard.target_duration_seconds,
         "tone_prompt": storyboard.tone_prompt,
     }
+
+
+def find_pending_script_action(
+    messages: list[StoryboardMessageRecord],
+    current_script: str | None,
+    script_updated_at: str | None,
+) -> dict[str, Any] | None:
+    """读取最近一版尚未应用到脚本框的候选稿。"""
+    normalized_current = (current_script or "").strip()
+    for message in reversed(messages):
+        action = message.action_json or {}
+        if action.get("type") != "apply_script_text":
+            continue
+        if script_updated_at and message.created_at and message.created_at <= script_updated_at:
+            continue
+        candidate = str(action.get("script_text") or "").strip()
+        if candidate and candidate != normalized_current:
+            return action
+    return None
+
+
+def build_script_revision_blocks(current_script: str | None, candidate_script: str | None) -> list[dict[str, str]]:
+    """把当前脚本和候选稿转成修订模式片段。"""
+    current_text = (current_script or "").strip()
+    candidate_text = (candidate_script or "").strip()
+    if not candidate_text:
+        return []
+    if not current_text:
+        return [{"tag": "insert", "text": candidate_text}]
+
+    blocks: list[dict[str, str]] = []
+    matcher = difflib.SequenceMatcher(None, list(current_text), list(candidate_text), autojunk=False)
+    for tag, old_start, old_end, new_start, new_end in matcher.get_opcodes():
+        old_text = current_text[old_start:old_end]
+        new_text = candidate_text[new_start:new_end]
+        if tag == "equal" and old_text:
+            blocks.append({"tag": "equal", "text": old_text})
+        elif tag == "delete" and old_text:
+            blocks.append({"tag": "delete", "text": old_text})
+        elif tag == "insert" and new_text:
+            blocks.append({"tag": "insert", "text": new_text})
+        elif tag == "replace":
+            if old_text:
+                blocks.append({"tag": "delete", "text": old_text})
+            if new_text:
+                blocks.append({"tag": "insert", "text": new_text})
+    return blocks
 
 
 def format_sse_event(event: str, data: dict[str, Any]) -> str:
@@ -2054,12 +2209,12 @@ def run_storyboard_fill_job(
     contexts: list[StoryClipContext],
     revision_prompt: str | None = None,
 ) -> None:
-    """后台基于已确认框架填充完整脚本和素材排序。"""
+    """后台基于已确认框架生成或改写脚本，不排序素材。"""
     try:
         storyboard = get_storyboard(storyboard_id, DB_PATH)
         if storyboard is None:
             return
-        plan = generate_storyboard_plan(
+        script = generate_storyboard_script(
             clips=contexts,
             brief_text=storyboard.brief_text,
             target_duration_seconds=storyboard.target_duration_seconds,
@@ -2068,7 +2223,24 @@ def run_storyboard_fill_job(
             previous_plan_text=build_storyboard_previous_text(storyboard) if storyboard.script_text else None,
             revision_prompt=revision_prompt,
         )
-        save_storyboard_plan(storyboard, plan, revision_prompt=revision_prompt)
+        save_storyboard_script(storyboard, script, revision_prompt=revision_prompt)
+    except Exception as exc:
+        update_storyboard_error(storyboard_id, str(exc), DB_PATH)
+
+
+def run_storyboard_clip_match_job(storyboard_id: int, contexts: list[StoryClipContext]) -> None:
+    """脚本确认后，后台生成素材排序。"""
+    try:
+        storyboard = get_storyboard(storyboard_id, DB_PATH)
+        if storyboard is None:
+            return
+        clip_order = generate_storyboard_clip_order(
+            clips=contexts,
+            script_text=storyboard.script_text or "",
+            target_duration_seconds=storyboard.target_duration_seconds,
+            tone_prompt=storyboard.tone_prompt,
+        )
+        save_storyboard_clip_order(storyboard, clip_order)
     except Exception as exc:
         update_storyboard_error(storyboard_id, str(exc), DB_PATH)
 
@@ -2092,10 +2264,20 @@ def start_storyboard_fill_job(
     contexts: list[StoryClipContext],
     revision_prompt: str | None = None,
 ) -> None:
-    """启动完整故事线后台任务。"""
+    """启动脚本生成或改写后台任务。"""
     thread = threading.Thread(
         target=run_storyboard_fill_job,
         args=(storyboard_id, contexts, revision_prompt),
+        daemon=True,
+    )
+    thread.start()
+
+
+def start_storyboard_clip_match_job(storyboard_id: int, contexts: list[StoryClipContext]) -> None:
+    """启动素材匹配后台任务。"""
+    thread = threading.Thread(
+        target=run_storyboard_clip_match_job,
+        args=(storyboard_id, contexts),
         daemon=True,
     )
     thread.start()
@@ -2121,11 +2303,18 @@ def build_storyboard_context(request: Request, storyboard_id: int, error_message
         for item in item_records
     ]
     script_paragraphs = build_script_paragraphs(storyboard, story_items)
+    pending_script_action = find_pending_script_action(messages, storyboard.script_text, storyboard.updated_at)
+    pending_script_revision_blocks = build_script_revision_blocks(
+        storyboard.script_text,
+        pending_script_action.get("script_text") if pending_script_action else None,
+    )
     return {
         **build_common_context(request),
         "storyboard": storyboard,
         "story_items": story_items,
         "script_paragraphs": script_paragraphs,
+        "pending_script_action": pending_script_action,
+        "pending_script_revision_blocks": pending_script_revision_blocks,
         "story_messages": messages,
         "selected_clips": selected_clips,
         "current_library": library,
@@ -2691,12 +2880,20 @@ def grid_page(
 
 
 @app.get("/upload", include_in_schema=False)
-def upload_page(request: Request, library_id: Optional[int] = Query(default=None)):
+def upload_page(
+    request: Request,
+    library_id: Optional[int] = Query(default=None),
+    scan_folder_path: str = Query(default=""),
+):
     """渲染独立上传页。"""
     return templates.TemplateResponse(
         request=request,
         name="upload.html",
-        context=build_upload_page_context(request, selected_library_id=library_id),
+        context=build_upload_page_context(
+            request,
+            selected_library_id=library_id,
+            auto_scan_folder=scan_folder_path.strip(),
+        ),
     )
 
 
@@ -2777,6 +2974,54 @@ def clip_detail_page(
         name="clip_detail.html",
         context=build_clip_detail_context(request, clip_id, current_library_id, return_url=return_url),
     )
+
+
+@app.get("/director-desk", include_in_schema=False)
+def director_desk_page(request: Request, library_id: Optional[int] = Query(default=None)):
+    """打开素材回看与随手记导演台。"""
+    current_library_id = resolve_library_id(request, library_id)
+    library = require_accessible_library(request, current_library_id)
+    clips = load_clips(request, library_id=current_library_id)
+    selected = load_clip_detail(clips[0].id) if clips else None
+    return templates.TemplateResponse(
+        request=request,
+        name="director_desk.html",
+        context={
+            **build_common_context(request),
+            "library": library,
+            "clips": clips,
+            "selected": selected,
+            "library_memory_note": library.memory_note or "",
+        },
+    )
+
+
+@app.get("/director-desk/clips/{clip_id}", include_in_schema=False)
+def director_desk_clip_partial(request: Request, clip_id: int):
+    """返回导演台切换素材后的右侧内容。"""
+    selected = require_accessible_clip(request, clip_id)
+    library = require_accessible_library(request, selected.library_id)
+    return templates.TemplateResponse(
+        request=request,
+        name="partials/director_desk_content.html",
+        context={"selected": selected, "library_memory_note": library.memory_note or ""},
+    )
+
+
+@app.post("/director-desk/clips/{clip_id}/note", include_in_schema=False)
+def save_director_desk_clip_note(request: Request, clip_id: int, note: str = Form(default="")):
+    """从导演台自动保存单条素材随手记。"""
+    clip = require_accessible_clip(request, clip_id)
+    update_clip_note(clip.id, note, DB_PATH)
+    return Response(content="", media_type="text/html")
+
+
+@app.post("/director-desk/libraries/{library_id}/note", include_in_schema=False)
+def save_director_desk_library_note(request: Request, library_id: int, note: str = Form(default="")):
+    """从导演台保存文件夹级随手记。"""
+    library = require_accessible_library(request, library_id)
+    update_library_memory_note(library.id, note, DB_PATH)
+    return Response(content="", media_type="text/html")
 
 
 @app.get("/clips/{clip_id}/cut", include_in_schema=False)
@@ -2974,13 +3219,30 @@ def revise_storyboard_framework_action(
 
 @app.post("/storyboards/{storyboard_id}/framework/confirm", include_in_schema=False)
 def confirm_storyboard_framework_action(request: Request, storyboard_id: int):
-    """确认叙事框架，并后台填充完整故事线。"""
+    """确认叙事框架，并后台生成完整脚本。"""
     storyboard = require_accessible_storyboard(request, storyboard_id)
     if not storyboard.framework_text:
         raise HTTPException(status_code=400, detail="叙事框架还没有生成完成。")
     contexts = build_story_clip_contexts(request, storyboard.selected_clip_ids, storyboard.library_id)
     update_storyboard_status(storyboard.id, "filling_pending", db_path=DB_PATH)
     start_storyboard_fill_job(storyboard.id, contexts)
+    return RedirectResponse(url=f"/storyboards/{storyboard.id}", status_code=303)
+
+
+@app.post("/storyboards/{storyboard_id}/match-clips", include_in_schema=False)
+def match_storyboard_clips_action(request: Request, storyboard_id: int):
+    """脚本确认后，再根据脚本匹配素材顺序。"""
+    storyboard = require_accessible_storyboard(request, storyboard_id)
+    if not (storyboard.script_text or "").strip():
+        return templates.TemplateResponse(
+            request=request,
+            name="storyboard_detail.html",
+            context=build_storyboard_context(request, storyboard_id, "请先生成并确认脚本，再匹配素材。"),
+            status_code=400,
+        )
+    contexts = build_story_clip_contexts(request, storyboard.selected_clip_ids, storyboard.library_id)
+    update_storyboard_status(storyboard.id, "matching_pending", db_path=DB_PATH)
+    start_storyboard_clip_match_job(storyboard.id, contexts)
     return RedirectResponse(url=f"/storyboards/{storyboard.id}", status_code=303)
 
 
@@ -2999,12 +3261,21 @@ def stream_storyboard_agent_action(
     request: Request,
     storyboard_id: int,
     message: str = Form(...),
+    draft_script_text: str = Form(default=""),
 ):
     """流式返回导演 Agent 对话。"""
     storyboard = require_accessible_storyboard(request, storyboard_id)
     cleaned_message = message.strip()
     if not cleaned_message:
         raise HTTPException(status_code=400, detail="请先输入想和导演 Agent 讨论的内容。")
+
+    cleaned_draft_script = draft_script_text.strip()
+    if cleaned_draft_script and cleaned_draft_script != (storyboard.script_text or "").strip():
+        update_storyboard_script(storyboard_id=storyboard.id, script_text=cleaned_draft_script, db_path=DB_PATH)
+        refreshed_storyboard = get_storyboard(storyboard.id, DB_PATH)
+        if refreshed_storyboard is not None:
+            storyboard = refreshed_storyboard
+
     contexts = build_story_clip_contexts(request, storyboard.selected_clip_ids, storyboard.library_id)
     existing_messages = list_storyboard_messages(storyboard.id, DB_PATH)
     add_storyboard_message(
@@ -3048,11 +3319,16 @@ def stream_storyboard_agent_action(
                 if should_offer_script_apply(cleaned_message, assistant_text)
                 else None
             )
+            message_content = (
+                strip_script_candidate(assistant_text)
+                if action and action.get("type") == "apply_script_text"
+                else assistant_text
+            )
             if assistant_text:
                 add_storyboard_message(
                     storyboard_id=storyboard.id,
                     role="assistant",
-                    content=assistant_text,
+                    content=message_content,
                     reasoning_text=reasoning_text or None,
                     action_json=action,
                     db_path=DB_PATH,
@@ -3061,7 +3337,7 @@ def stream_storyboard_agent_action(
                 run_id,
                 status="done",
                 reasoning_text=reasoning_text or None,
-                output_text=assistant_text or None,
+                output_text=message_content or None,
                 db_path=DB_PATH,
             )
             yield format_sse_event("done", {"action": action})
@@ -3092,16 +3368,56 @@ def revise_storyboard_action(
             status_code=400,
         )
     contexts = build_story_clip_contexts(request, storyboard.selected_clip_ids, storyboard.library_id)
-    update_storyboard_status(
-        storyboard.id,
-        "filling_pending",
-        revision_prompt=cleaned_revision,
-        target_duration_seconds=target_duration_seconds,
-        tone_prompt=tone_prompt,
+    try:
+        script = generate_storyboard_script(
+            clips=contexts,
+            brief_text=storyboard.brief_text,
+            target_duration_seconds=target_duration_seconds,
+            tone_prompt=tone_prompt,
+            framework_text=storyboard.framework_text,
+            previous_plan_text=build_storyboard_previous_text(storyboard) if storyboard.script_text else None,
+            revision_prompt=cleaned_revision,
+        )
+    except Exception as exc:
+        return templates.TemplateResponse(
+            request=request,
+            name="storyboard_detail.html",
+            context=build_storyboard_context(request, storyboard_id, str(exc)),
+            status_code=400,
+        )
+    add_storyboard_message(
+        storyboard_id=storyboard.id,
+        role="assistant",
+        content="我已经按这条建议生成了一版修订预览，可以在脚本区查看红绿改动后再决定是否接受。",
+        action_json={
+            "type": "apply_script_text",
+            "label": "接受全部修订",
+            "script_text": script.first_person_script,
+            "display_text": "我已经按这条建议生成了一版修订预览，可以在脚本区查看红绿改动后再决定是否接受。",
+        },
         db_path=DB_PATH,
     )
-    start_storyboard_fill_job(storyboard.id, contexts, cleaned_revision)
     return RedirectResponse(url=f"/storyboards/{storyboard.id}", status_code=303)
+
+
+@app.post("/storyboards/{storyboard_id}/script/apply", include_in_schema=False)
+def apply_storyboard_script_action(
+    request: Request,
+    storyboard_id: int,
+    script_text: str = Form(...),
+):
+    """直接应用 Agent 回复中的脚本候选稿，不再二次生成。"""
+    require_accessible_storyboard(request, storyboard_id)
+    cleaned_script = script_text.strip()
+    if not cleaned_script:
+        return templates.TemplateResponse(
+            request=request,
+            name="storyboard_detail.html",
+            context=build_storyboard_context(request, storyboard_id, "Agent 没有返回可应用的脚本候选稿。"),
+            status_code=400,
+        )
+    update_storyboard_script(storyboard_id=storyboard_id, script_text=cleaned_script, db_path=DB_PATH)
+    return RedirectResponse(url=f"/storyboards/{storyboard_id}", status_code=303)
 
 
 @app.post("/storyboards/{storyboard_id}/duration", include_in_schema=False)
@@ -3143,6 +3459,8 @@ def update_storyboard_script_action(
             status_code=400,
         )
     update_storyboard_script(storyboard_id=storyboard_id, script_text=script_text, db_path=DB_PATH)
+    if request.headers.get("x-requested-with") == "fetch":
+        return Response(status_code=204)
     return RedirectResponse(url=f"/storyboards/{storyboard_id}", status_code=303)
 
 
@@ -3153,7 +3471,7 @@ def rewrite_storyboard_script_selection_action(
     selected_text: str = Form(...),
     correction_reason: str = Form(...),
 ):
-    """根据用户说明，只改写完整脚本里被选中的文本。"""
+    """把选中的问题段作为定位信息，生成一版全局候选脚本。"""
     storyboard = require_accessible_storyboard(request, storyboard_id)
     cleaned_selected = selected_text.strip()
     cleaned_reason = correction_reason.strip()
@@ -3180,13 +3498,22 @@ def rewrite_storyboard_script_selection_action(
             status_code=400,
         )
     contexts = build_story_clip_contexts(request, storyboard.selected_clip_ids, storyboard.library_id)
+    revision_prompt = "\n".join(
+        [
+            "用户选中了脚本中的一段，指出这里有问题。请不要只替换这一段，而是基于这个问题全局改写完整脚本，修正前后铺垫、语气和呼应。",
+            f"选中的问题段：\n{cleaned_selected}",
+            f"用户指出的问题：\n{cleaned_reason}",
+        ]
+    )
     try:
-        rewritten = rewrite_script_selection(
+        script = generate_storyboard_script(
             clips=contexts,
-            full_script_text=current_script,
-            selected_text=cleaned_selected,
-            correction_reason=cleaned_reason,
+            brief_text=storyboard.brief_text,
+            target_duration_seconds=storyboard.target_duration_seconds,
             tone_prompt=storyboard.tone_prompt,
+            framework_text=storyboard.framework_text,
+            previous_plan_text=build_storyboard_previous_text(storyboard),
+            revision_prompt=revision_prompt,
         )
     except Exception as exc:
         return templates.TemplateResponse(
@@ -3195,21 +3522,22 @@ def rewrite_storyboard_script_selection_action(
             context=build_storyboard_context(request, storyboard_id, str(exc)),
             status_code=400,
         )
-    update_storyboard_script(
-        storyboard_id=storyboard.id,
-        script_text=current_script.replace(cleaned_selected, rewritten, 1),
-        db_path=DB_PATH,
-    )
     add_storyboard_message(
         storyboard_id=storyboard.id,
         role="user",
-        content=f"我指出脚本局部有误：{cleaned_reason}\n原文：{cleaned_selected}",
+        content=f"我指出脚本这里有问题，请基于它全局改稿：{cleaned_reason}\n原文：{cleaned_selected}",
         db_path=DB_PATH,
     )
     add_storyboard_message(
         storyboard_id=storyboard.id,
         role="assistant",
-        content=f"已将该段改为：{rewritten}",
+        content="我已经基于你选中的问题段生成了一版全局改稿，可以在脚本区预览后应用。",
+        action_json={
+            "type": "apply_script_text",
+            "label": "应用这版脚本",
+            "script_text": script.first_person_script,
+            "display_text": "我已经基于你选中的问题段生成了一版全局改稿，可以在脚本区预览后应用。",
+        },
         db_path=DB_PATH,
     )
     return RedirectResponse(url=f"/storyboards/{storyboard.id}", status_code=303)
@@ -3272,6 +3600,12 @@ def regenerate_clip_summary_from_transcript(
             clip_id=clip.id,
             library_id=clip.library_id,
             summary=analysis.summary,
+            db_path=DB_PATH,
+        )
+        update_clip_detail(
+            clip_id=clip.id,
+            rename_title=analysis.rename_title,
+            detail_summary=analysis.detail,
             db_path=DB_PATH,
         )
     except ValueError as exc:
@@ -3818,6 +4152,23 @@ def clip_media(request: Request, clip_id: int):
     return FileResponse(path=file_path, media_type=media_type, filename=clip.filename)
 
 
+@app.post("/clips/{clip_id}/relink", include_in_schema=False)
+def relink_clip_source(request: Request, clip_id: int, folder_path: str = Form(...)):
+    """在用户指定的文件夹中按内容 Hash 重新定位失联素材。"""
+    clip = require_accessible_clip(request, clip_id)
+    if clip is None:
+        raise HTTPException(status_code=404, detail="素材不存在。")
+    folder = Path(folder_path).expanduser().resolve()
+    if not folder.is_dir():
+        raise HTTPException(status_code=400, detail="选择的文件夹不存在或不可访问。")
+
+    for candidate in scan_folder(folder):
+        if build_file_content_hash(candidate) == query_clip_detail(clip_id, DB_PATH)["video_hash"]:
+            update_clip_file_location(clip_id, candidate, DB_PATH)
+            return RedirectResponse(url=f"/clips/{clip_id}", status_code=303)
+    raise HTTPException(status_code=404, detail="所选文件夹及其子文件夹中没有找到同一素材。")
+
+
 @app.get("/clips", include_in_schema=False)
 def clips_partial(
     request: Request,
@@ -3878,6 +4229,50 @@ def create_upload_job(
             context={
                 "upload_job": upload_job,
                 "upload_summary": build_upload_summary(upload_job),
+                "format_eta_text": format_eta_text,
+            },
+        )
+    except HTTPException as exc:
+        return templates.TemplateResponse(
+            request=request,
+            name="partials/upload_panel.html",
+            context=build_upload_page_context(
+                request,
+                error_message=exc.detail,
+                selected_library_id=library_id,
+                pending_library_name=new_library_name,
+            ),
+        )
+
+
+@app.post("/sources/folders", include_in_schema=False)
+def create_folder_scan_job(
+    request: Request,
+    folder_path: str = Form(...),
+    library_id: Optional[int] = Form(default=None),
+    new_library_name: str = Form(default=""),
+):
+    """直接扫描本地素材文件夹，不经过浏览器上传或复制。"""
+    try:
+        folder = Path(folder_path).expanduser().resolve()
+        library_name = new_library_name.strip() or folder.name
+        library = resolve_upload_library(request, library_id, library_name)
+        video_paths, skipped_items, source_modified_map = prepare_folder_scan(folder, library.id)
+        scan_job = start_upload_job(
+            video_paths,
+            library,
+            skipped_items,
+            source_modified_map,
+            source_label="已引用原始本地文件，不会复制视频",
+            job_message="本地文件夹扫描完成",
+            batch_dir=folder,
+        )
+        return templates.TemplateResponse(
+            request=request,
+            name="partials/upload_job.html",
+            context={
+                "upload_job": scan_job,
+                "upload_summary": build_upload_summary(scan_job),
                 "format_eta_text": format_eta_text,
             },
         )

@@ -118,6 +118,14 @@
         </div>
         {% endif %}
 
+        {% if clip.source_missing %}
+        <form id="relink-source-form" action="/clips/{{ clip.id }}/relink" method="post" class="mb-4 flex flex-col gap-2 rounded-[8px] border border-[#5A2525] bg-[#171114] p-3 sm:flex-row">
+          <input id="relink-source-path" name="folder_path" required placeholder="选择原始素材所在文件夹" class="min-w-0 flex-1 rounded-md border border-white/10 bg-[#0B0B0D] px-3 py-2 text-xs text-white outline-none focus:border-[#D7FF3E]">
+          <button id="relink-source-picker" type="button" class="rounded-md border border-white/10 px-3 py-2 text-xs text-white transition hover:border-white/30">选择文件夹</button>
+          <button type="submit" class="rounded-md bg-[#D7FF3E] px-3 py-2 text-xs font-medium text-[#11150A]">重新关联</button>
+        </form>
+        {% endif %}
+
         {% if clip.keyframe_urls %}
         <div class="mb-4">
           <p class="mb-2 text-[10px] uppercase tracking-[0.08em] text-[#8A8A92]">Key moments</p>
@@ -513,6 +521,26 @@
         hideEditor(button.dataset.cancelTarget, button.dataset.showTarget || "");
       });
     });
+
+    const relinkPicker = document.getElementById("relink-source-picker");
+    const relinkPath = document.getElementById("relink-source-path");
+    if (relinkPicker && relinkPath) {
+      relinkPicker.addEventListener("click", async () => {
+        relinkPicker.disabled = true;
+        relinkPicker.textContent = "正在打开 Finder…";
+        try {
+          const response = await fetch("/api/pick-folder");
+          const result = await response.json();
+          if (result.error) throw new Error(result.error);
+          if (result.path) relinkPath.value = result.path;
+        } catch (error) {
+          window.alert(error.message || "无法选择本地文件夹。");
+        } finally {
+          relinkPicker.disabled = false;
+          relinkPicker.textContent = "选择文件夹";
+        }
+      });
+    }
 
     const video = document.getElementById("clip-player");
     if (!video) return;

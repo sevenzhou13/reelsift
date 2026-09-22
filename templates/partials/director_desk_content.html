@@ -1,0 +1,22 @@
+<div class="space-y-6" data-clip-id="{{ selected.id }}">
+  <div class="grid gap-6 xl:grid-cols-[minmax(0,1fr)_280px]">
+    <section>
+      {% if selected.media_url %}<video controls preload="metadata" class="aspect-video w-full rounded-xl bg-black" poster="{{ selected.cover_url or '' }}"><source src="{{ selected.media_url }}" type="{{ selected.media_type or 'video/mp4' }}"></video>{% else %}<div class="flex aspect-video items-center justify-center rounded-xl bg-black text-sm text-gray-500">{{ selected.media_error_message or '预览正在生成中' }}</div>{% endif %}
+      <div class="mt-4 flex flex-wrap items-start justify-between gap-3"><h2 class="break-all text-lg font-semibold text-white">{{ selected.filename }}</h2><span class="text-xs text-gray-500">{{ selected.shot_time_text }}</span></div>
+      <div class="mt-4 rounded-lg border-l-2 border-lime-300 bg-lime-300/5 p-3 text-sm leading-6 text-gray-200"><span class="mr-2 text-xs font-semibold tracking-wider text-lime-300">AI 回忆</span>{{ selected.summary }}</div>
+      <p class="mt-5 text-xs font-medium tracking-wider text-gray-500">口播摘录</p>
+      <div class="mt-2 min-h-12 text-sm leading-7 text-gray-300">{% if selected.transcripts %}{{ selected.transcripts[:3]|map(attribute='text')|join(' ') }}{% else %}暂无口播摘录，可根据画面与关键帧记录感想。{% endif %}</div>
+      {% if selected.keyframe_urls %}<div class="mt-4 flex gap-2 overflow-x-auto">{% for frame in selected.keyframe_urls[:4] %}<img src="{{ frame }}" class="h-14 w-20 rounded object-cover" alt="关键帧">{% endfor %}</div>{% endif %}
+    </section>
+    <aside class="rounded-xl border border-white/10 bg-white/[0.03] p-4">
+      <h3 class="text-sm font-semibold text-white">这段对我意味着什么？</h3><p class="mt-1 text-xs leading-5 text-gray-500">一句就够，导演 Agent 会优先参考你的感受。</p>
+      <form class="mt-3" hx-post="/director-desk/clips/{{ selected.id }}/note" hx-trigger="input delay:700ms from:find textarea" hx-swap="none">
+        <textarea name="note" class="h-36 w-full rounded-lg border border-white/10 bg-black/20 p-3 text-sm leading-6 text-gray-100 outline-none placeholder:text-gray-600 focus:border-lime-300/60" placeholder="例如：这段比平时真诚，适合讲刚开始做内容的不安。">{{ selected.user_note or '' }}</textarea>
+        <div class="mt-2 flex items-center justify-between"><span class="text-xs text-gray-500">输入后自动保存</span><button class="rounded-md bg-lime-300 px-3 py-1.5 text-xs font-semibold text-gray-950">保存</button></div>
+      </form>
+      <div class="mt-6 border-t border-white/10 pt-4"><h3 class="text-sm font-semibold text-white">文件夹随手记</h3><p class="mt-1 text-xs leading-5 text-gray-500">记录这批素材的共同背景，可选。</p>
+        <form class="mt-3" hx-post="/director-desk/libraries/{{ selected.library_id }}/note" hx-trigger="input delay:700ms from:find textarea" hx-swap="none"><textarea name="note" class="h-24 w-full rounded-lg border border-white/10 bg-black/20 p-3 text-sm leading-6 text-gray-100 outline-none focus:border-lime-300/60" placeholder="这批素材发生在……">{{ library_memory_note or '' }}</textarea><button class="mt-2 rounded-md border border-white/15 px-3 py-1.5 text-xs text-gray-200">保存文件夹随手记</button></form>
+      </div>
+    </aside>
+  </div>
+</div>

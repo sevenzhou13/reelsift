@@ -48,6 +48,17 @@
     <input id="upload-new-library-name" type="hidden" name="new_library_name" value="{{ pending_library_name }}">
     <input id="upload-file-metadata" type="hidden" name="file_metadata_json" value="[]">
   </form>
+  <form
+    id="folder-scan-form"
+    hx-post="/sources/folders"
+    hx-target="#upload-flow"
+    hx-swap="innerHTML"
+    class="hidden"
+  >
+    <input id="folder-scan-path" type="hidden" name="folder_path">
+    <input id="folder-scan-library-id" type="hidden" name="library_id" value="{{ selected_library_id }}">
+    <input id="folder-scan-library-name" type="hidden" name="new_library_name" value="{{ pending_library_name }}">
+  </form>
 
   <section id="upload-flow">
     {% include "partials/upload_panel.html" %}
@@ -56,12 +67,17 @@
 
 <script>
   (() => {
+    const autoScanFolder = {{ auto_scan_folder|tojson }};
     const uploadInput = document.getElementById("upload-input");
     const uploadFolderInput = document.getElementById("upload-folder-input");
     const uploadForm = document.getElementById("upload-form");
     const hiddenLibraryId = document.getElementById("upload-library-id");
     const hiddenNewLibraryName = document.getElementById("upload-new-library-name");
     const hiddenFileMetadata = document.getElementById("upload-file-metadata");
+    const folderScanForm = document.getElementById("folder-scan-form");
+    const folderScanPath = document.getElementById("folder-scan-path");
+    const folderScanLibraryId = document.getElementById("folder-scan-library-id");
+    const folderScanLibraryName = document.getElementById("folder-scan-library-name");
     const videoExtensions = new Set([".mp4", ".mov", ".mkv", ".webm"]);
 
     function syncLibraryInputs() {
@@ -73,6 +89,8 @@
       if (newLibraryName && hiddenNewLibraryName) {
         hiddenNewLibraryName.value = newLibraryName.value;
       }
+      if (librarySelect && folderScanLibraryId) folderScanLibraryId.value = librarySelect.value;
+      if (newLibraryName && folderScanLibraryName) folderScanLibraryName.value = newLibraryName.value;
     }
 
     function getFilePathParts(file) {
@@ -126,9 +144,19 @@
       hiddenNewLibraryName.value = folderName;
     }
 
+    function startFolderScan(folderPath) {
+      if (!folderPath || !folderScanPath || !folderScanForm) return;
+      folderScanPath.value = folderPath;
+      if (folderScanLibraryName && !folderScanLibraryName.value.trim()) {
+        folderScanLibraryName.value = folderPath.split("/").filter(Boolean).pop() || "素材库";
+      }
+      htmx.trigger(folderScanForm, "submit");
+    }
+
     function bindUploadTrigger() {
       const trigger = document.getElementById("upload-trigger");
       const folderTrigger = document.getElementById("upload-folder-trigger");
+      const scanFolderTrigger = document.getElementById("scan-folder-trigger");
       const librarySelect = document.getElementById("library-select");
       const newLibraryName = document.getElementById("new-library-name");
       if (!trigger || trigger.dataset.bound === "true") return;
@@ -145,6 +173,25 @@
           if (uploadInput) uploadInput.value = "";
           syncLibraryInputs();
           uploadFolderInput.click();
+        });
+      }
+      if (scanFolderTrigger && scanFolderTrigger.dataset.bound !== "true") {
+        scanFolderTrigger.dataset.bound = "true";
+        scanFolderTrigger.addEventListener("click", async () => {
+          syncLibraryInputs();
+          scanFolderTrigger.disabled = true;
+          scanFolderTrigger.textContent = "正在打开 Finder…";
+          try {
+            const response = await fetch("/api/pick-folder");
+            const result = await response.json();
+            if (result.error) throw new Error(result.error);
+            startFolderScan(result.path);
+          } catch (error) {
+            window.alert(error.message || "无法选择本地文件夹。");
+          } finally {
+            scanFolderTrigger.disabled = false;
+            scanFolderTrigger.textContent = "扫描本地素材文件夹";
+          }
         });
       }
       if (librarySelect && librarySelect.dataset.bound !== "true") {
@@ -184,7 +231,10 @@
       }
     });
 
-    document.addEventListener("DOMContentLoaded", bindUploadTrigger);
+    document.addEventListener("DOMContentLoaded", () => {
+      bindUploadTrigger();
+      if (autoScanFolder) startFolderScan(autoScanFolder);
+    });
   })();
 </script>
 {% endblock %}

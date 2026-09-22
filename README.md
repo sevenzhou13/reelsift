@@ -307,6 +307,36 @@ powershell -ExecutionPolicy Bypass -File .\run_local.ps1
 - 删除后默认保留 7 天
 - 可从回收站恢复素材
 
+## Finder 快速操作（macOS）
+
+在 Finder 里选中素材文件夹，右键即可直接扫描或整理，不用先打开网页。
+
+### 安装
+
+```bash
+# 安装两个 Finder 快速操作（Automator 工作流）
+./scripts/install_finder_quick_action.sh
+
+# 构建并安装原生导演台 App（可选，带实时进度窗口）
+./scripts/install_native_finder_service.sh
+```
+
+安装后若右键菜单没有出现，注销重登或重启 Finder 再试。
+
+### 两个快速操作
+
+- **Reelsift 扫描素材** — 自动启动本地服务，并在浏览器打开该文件夹的扫描上传页。
+- **Reelsift AI 整理并命名素材** — 在本地直接分析视频，不经过网页和上传。弹窗选择「保存到新文件夹」或「重命名原文件」，处理完生成 CSV 清单并写入导演台索引。
+
+### 原生导演台 App
+
+`macos/` 下的 `ReelsiftFinderService` 是原生 Swift/AppKit 导演台，以素材和 Story Beat 为中心，带实时进度窗口；它同样调用 `scripts/reelsift_finder_organize.py` 完成分析。
+
+### 运行日志
+
+- 扫描：`data/finder-scan.log`
+- 整理：`data/finder-organize.log`
+
 ## 目录结构
 
 ```text
@@ -326,6 +356,18 @@ reelsift/
 │   ├── recycle.html
 │   └── partials/
 ├── static/
+├── scripts/
+│   ├── install_finder_quick_action.sh
+│   ├── install_native_finder_service.sh
+│   ├── reelsift_finder_scan.py
+│   ├── reelsift_finder_organize.py
+│   └── reelsift_finder_dialog.swift
+├── finder/
+│   ├── Reelsift 扫描素材.workflow
+│   └── Reelsift AI 整理并命名素材.workflow
+├── macos/
+│   ├── ReelsiftFinderService.swift
+│   └── ReelsiftFinderService.app
 └── data/
     ├── uploads/
     ├── thumbnails/
@@ -459,6 +501,16 @@ powershell -ExecutionPolicy Bypass -File .\verify_local.ps1
 
 ```bash
 ./.venv/bin/python reelsift.py /path/to/my/videos
+```
+
+### 安装 Finder 快速操作（macOS）
+
+```bash
+# 安装两个 Finder 快速操作（扫描素材 / AI 整理并命名）
+./scripts/install_finder_quick_action.sh
+
+# 构建并安装原生 Finder 导演台 App（可选）
+./scripts/install_native_finder_service.sh
 ```
 
 ### 语法检查

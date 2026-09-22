@@ -70,7 +70,7 @@ def main() -> None:
 
         # 抽帧
         try:
-            video_hash, frame_dir = extract_keyframes(video, CACHE_DIR)
+            video_hash, frame_dir = extract_keyframes(video, CACHE_DIR, cache_key=video_hash)
             frames = get_keyframe_paths(frame_dir)
             console.print(f"  抽帧：{len(frames)} 张关键帧已保存")
         except Exception as e:
