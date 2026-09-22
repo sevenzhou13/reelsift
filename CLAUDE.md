@@ -174,15 +174,14 @@ reelsift/
 
 ## 当前进度
 
-- [x] Day 1: 视频扫描 + 关键帧抽取
-- [x] Day 2: 视觉摘要与标签生成
-- [x] Day 3: SQLite schema + 状态管理
-- [x] Day 4: FastAPI 页面、上传页、详情页
-- [x] Day 5: 素材网格、搜索、标签筛选
-- [~] Day 6: 多选导出、项目树、回收站、对比页、收藏评分、粗剪页已可用；仍在收尾交互
-- [ ] Day 7: 真实素材测试 + bug 修复
+- [x] 素材粗筛主链路（原 Day 1–6）：扫描、抽帧、摘要、素材库、详情、粗剪、对比、导出、回收站
+- [x] 用户体系：注册登录、管理员后台、手机号验证、找回密码、按用户隔离素材
+- [~] 故事创作：故事线、故事板、导演台、Story Beat、Story Agent（已可用，交互打磨中）
+- [~] Finder 服务：扫描素材、AI 整理命名、原生导演台（已可用）
+- [~] 作品页（Reelwave）：案例页已就绪
+- [ ] 上云：切换 PostgreSQL + 真实短信服务
 
-**今天做到哪一天**：Day 6（项目树、回收站、对比页、选择模式、收藏评分与粗剪交互收尾中）
+**当前重点**：故事创作闭环（Story Beat / Story Agent / 原生导演台）与 Finder 服务的交互收尾
 
 ### 当前实现方法
 
@@ -197,6 +196,12 @@ reelsift/
 - 粗剪：详情页进入独立粗剪页，支持命名片段、预览、修边、删除确认和按名称导出
 - 导出目录：素材批量导出和粗剪片段导出可手动输入路径，也可调用本地文件夹选择弹窗
 - 文件夹弹窗：macOS 使用 `NSOpenPanel`，Windows 使用 `tkinter.filedialog.askdirectory()`；WSL、Docker、无 GUI 环境请手动输入路径
+- 故事线：`story_ai.py` 把素材 + 想法 + 时长 + 口吻整理成第一人称叙事，分阶段输出框架 / 脚本 / 素材排序
+- 故事板：`/storyboards/*` 路由承载叙事框架、素材匹配、脚本、时长、Agent 流式对话与修订
+- Story Beat：`db.py` 的 `story_beats` / `story_beat_clips`，支持重排节拍、在节拍间移动素材，AI 解释编辑动作
+- Story Agent：`stream_story_agent_reply` 流式对话，理解移动/重排操作给出局部建议；AI 是推理层不是主体
+- 导演台：Web 版 `director_desk.html` 浏览素材；原生 macOS App（`macos/ReelsiftFinderService.swift`）经 `scripts/reelsift_director_bridge.py` 读写 Story Beat / Story Canvas
+- Finder 服务：`finder/` 两个 Automator 快速操作 + `macos/` 原生 App，脚本在 `scripts/`
 
 ---
 
